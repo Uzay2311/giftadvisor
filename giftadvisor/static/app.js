@@ -122,6 +122,26 @@
     return (query || '').replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
+  function formatReviews(num) {
+    if (num == null || num === '') return '';
+    const n = parseInt(num, 10);
+    if (isNaN(n)) return String(num);
+    return n.toLocaleString();
+  }
+
+  function renderStars(rating) {
+    const r = parseFloat(rating);
+    if (isNaN(r) || r < 0) return '';
+    const full = Math.floor(r);
+    const partial = r - full;
+    const empty = 5 - full - (partial > 0 ? 1 : 0);
+    let html = '';
+    for (let i = 0; i < full; i++) html += '<span class="ga-star ga-star--full"></span>';
+    if (partial > 0) html += '<span class="ga-star ga-star--partial" style="--fill:' + (partial * 100) + '%"></span>';
+    for (let i = 0; i < empty; i++) html += '<span class="ga-star ga-star--empty"></span>';
+    return html;
+  }
+
   function renderProductCard(product) {
     const card = document.createElement('a');
     card.className = 'ga-product';
@@ -151,11 +171,23 @@
     title.className = 'ga-product__title';
     title.textContent = product.title || 'Product';
     body.appendChild(title);
-    if (product.description) {
-      const ratingEl = document.createElement('div');
-      ratingEl.className = 'ga-product__rating';
-      ratingEl.textContent = product.description.slice(0, 60) + (product.description.length > 60 ? '…' : '');
-      body.appendChild(ratingEl);
+    if (product.rating != null || product.reviews != null) {
+      const ratingRow = document.createElement('div');
+      ratingRow.className = 'ga-product__rating';
+      if (product.rating != null) {
+        const starsWrap = document.createElement('span');
+        starsWrap.className = 'ga-product__stars';
+        starsWrap.innerHTML = renderStars(product.rating);
+        ratingRow.appendChild(starsWrap);
+      }
+      const ratingText = document.createElement('span');
+      ratingText.className = 'ga-product__rating-text';
+      const parts = [];
+      if (product.rating != null) parts.push(String(product.rating));
+      if (product.reviews != null) parts.push(formatReviews(product.reviews) + ' reviews');
+      ratingText.textContent = parts.join(' · ');
+      ratingRow.appendChild(ratingText);
+      body.appendChild(ratingRow);
     }
     const price = document.createElement('div');
     price.className = 'ga-product__price';
@@ -320,7 +352,7 @@
     sendBtn.disabled = true;
 
     const { row: typingRow, bubble: typingBubble } = renderMessage('assistant', '', true);
-    typingBubble.innerHTML = '<div class="ga-loading"><div class="ga-loading__spinner"></div><span class="ga-loading__text">Finding gifts for you</span><span class="ga-loading__dots"><span></span><span></span><span></span></span></div>';
+    typingBubble.innerHTML = '<div class="ga-loading"><div class="ga-loading__spinner"></div></div>';
 
     try {
       await callBackendStream(
@@ -379,7 +411,12 @@
           });
           scrollToBottom();
         },
-        () => {}
+        (loadingPayload) => {
+          if (loadingPayload && loadingPayload.queries && loadingPayload.queries.length > 0) {
+            typingBubble.innerHTML = '<div class="ga-loading"><div class="ga-loading__spinner"></div><span class="ga-loading__text">Finding gifts for you</span><span class="ga-loading__dots"><span></span><span></span><span></span></span></div>';
+            scrollToBottom();
+          }
+        }
       );
     } catch (err) {
       typingBubble.innerHTML = '';

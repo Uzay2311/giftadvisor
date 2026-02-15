@@ -74,17 +74,18 @@ Return structured JSON only:
 
 Rules:
 - gift_context: update as the conversation progresses. ALWAYS set recipient_info (e.g. "wife", "mom") and budget when user mentions them—critical for follow-ups.
-- search_queries: YOU decide when to submit a product search. Return search_queries when the user wants product results; return null when you're only clarifying, asking questions, or no search is needed.
-  - SUBMIT when: user asks for gift ideas, suggests a product type, or refines a previous request (revision or new topic).
-  - DO NOT SUBMIT when: you're only asking a clarifying question, or the message doesn't warrant a product search.
-- REVISION vs NEW: Classify each follow-up:
-  - REVISION: User adds constraints to the previous request—e.g. "200+", "under $50", "red", "women's only", "budget $100". Keep the product type, add the new constraint. search_queries MUST combine previous context + new constraint (e.g. "red running shoes women under 200").
-  - NEW: User asks for something completely different (e.g. "mouse pad" after "red running shoes"). Generate fresh search_queries for the new topic. Ignore previous_search_queries.
-- ALWAYS include attributes in search_queries when known:
-  - Price: "200+", "under $50", "budget 100" → append "under 200", "under 50", "under 100" to the query string.
-  - Gender: wife/mom/daughter → "women"; husband/dad/son → "men". Never return men's products when recipient is female.
-  - Color: if user says "red", "blue", etc., include in query (e.g. "red running shoes women").
-- Use short, Amazon-style terms: "red running shoes women under 200", "pickleball shoes women".
+- search_queries: YOU decide when to submit a product search. Return search_queries ONLY when a product search is needed; return null otherwise. The backend will NOT search when you return null.
+  - SUBMIT when: (1) user asks for gift ideas with enough context (product type, recipient, etc.), (2) user suggests a product type to search, (3) user revises a previous request (e.g. "200+", "red"), (4) user asks for something new/different.
+  - DO NOT SUBMIT when: (1) not enough info to search (greetings, "ola", "test", typos, unclear), (2) you're asking a clarifying question, (3) user asks about the products already shown (when previous_products_shown=true, e.g. "which one?", "tell me more about the first")—answer from your suggestions/gift_context, (4) message doesn't warrant a product search.
+- REVISION vs NEW: You receive previous_search_queries and gift_context. YOU must rewrite, revise, or build the full query—there is no backend logic to inject price/gender.
+  - REVISION: User adds constraints (e.g. "200+", "under $50", "red"). REWRITE previous_search_queries into new search_queries that combine the product type + new constraint. "200+" → "over 200"; "under $50" → "under 50". Example: previous=["running shoes women"], user says "200+" → search_queries: [{"query": "running shoes women over 200", "subtitle": "..."}].
+  - NEW: User asks for something different. Generate fresh search_queries for the new topic. Ignore previous_search_queries.
+- CRITICAL: ALWAYS embed price, gender, color directly in each search_queries query string. The query is sent to Amazon search as-is—there is no backend injection.
+  - Price MINIMUM (user wants expensive): "200+", "$200+", "over 200" → include "over 200" or "from 200" in query (e.g. "luxury watch over 200").
+  - Price MAXIMUM (user wants cheap): "under $50", "budget 100", "max 50" → include "under 50", "under 100" in query (e.g. "running shoes women under 50").
+  - Gender: wife/mom/daughter → "women"; husband/dad/son → "men". Include in every query when known (e.g. "women running shoes").
+  - Color: include in query when user says "red", "blue", etc.
+- Example queries: "luxury watch over 200", "red running shoes women under 50", "pickleball shoes women".
 - subtitle: brief 3-8 word description for the carousel.
 - NEVER include search strings in your reply. The reply is user-facing only.
 - If unsure about a field, omit or null
@@ -192,78 +193,6 @@ def _derive_queries_from_gift_context(gift_context: Optional[dict]) -> list:
     return queries[:3]
 
 
-def _is_constraint_revision(message: str) -> bool:
-    """True if message looks like a constraint-only refinement (e.g. '200+', 'under $50')."""
-    import re
-    msg = (message or "").strip().lower()
-    if len(msg) > 35:
-        return False
-    if re.search(r"\d+\s*\+?|\$\s*\d+|\d+\s*\$|under\s*\d+|over\s*\d+|budget\s*\d+|max\s*\d+", msg):
-        return True
-    if re.match(r"^\d+\+?\s*$", msg) or re.match(r"^\$\d+\s*$", msg):
-        return True
-    return False
-
-
-def _inject_gift_context_filters(query: str, gift_context: Optional[dict]) -> str:
-    """Inject recipient, budget from gift_context into query if missing."""
-    import re
-    if not query or not isinstance(gift_context, dict):
-        return query
-    q = query.lower()
-    parts = []
-    recipient = (gift_context.get("recipient_info") or "").lower()
-    if recipient and "women" not in q and "men" not in q and "womens" not in q and "mens" not in q:
-        if any(w in recipient for w in ("wife", "mom", "mother", "daughter", "girlfriend", "her", "woman", "female")):
-            parts.append("women")
-        elif any(w in recipient for w in ("husband", "dad", "father", "son", "boyfriend", "him", "man", "male")):
-            parts.append("men")
-    budget = (gift_context.get("budget") or "").strip()
-    if budget and "under" not in q and "over" not in q and "budget" not in q and "$" not in q:
-        m = re.search(r"\$?\s*(\d+)", budget)
-        if m:
-            parts.append(f"under {m.group(1)}")
-    if not parts:
-        return query
-    return f"{query.strip()} " + " ".join(parts)
-
-
-def _merge_constraint_with_previous(message: str, previous_queries: list, gift_context: Optional[dict] = None) -> list:
-    """When user sends a constraint revision (e.g. '200+'), merge with previous queries."""
-    import re
-    if not isinstance(previous_queries, list) or not previous_queries:
-        return []
-    msg = (message or "").strip()
-    constraint = ""
-    m = re.search(r"(\d+)\s*\+", msg)
-    if m:
-        constraint = f"under {m.group(1)}"
-    else:
-        m = re.search(r"\$\s*(\d+)|\$(\d+)", msg)
-        if m:
-            constraint = f"under {m.group(1) or m.group(2)}"
-        else:
-            m = re.search(r"under\s*\$?\s*(\d+)", msg, re.I)
-            if m:
-                constraint = f"under {m.group(1)}"
-            else:
-                m = re.search(r"over\s*\$?\s*(\d+)", msg, re.I)
-                if m:
-                    constraint = f"over {m.group(1)}"
-                else:
-                    m = re.search(r"budget\s*\$?\s*(\d+)", msg, re.I)
-                    if m:
-                        constraint = f"under {m.group(1)}"
-                    else:
-                        m = re.search(r"^(\d+)\s*\+?\s*$", msg)
-                        if m:
-                            constraint = f"under {m.group(1)}"
-    if not constraint:
-        return []
-    merged = [f"{q.strip()} {constraint}" for q in previous_queries[:3] if str(q).strip()]
-    return [_inject_gift_context_filters(m, gift_context) for m in merged]
-
-
 def _user_message_to_search_queries(message: str) -> list:
     """Last-resort fallback: derive search query from user's message."""
     import re
@@ -325,37 +254,38 @@ def _resolve_search_queries(
     previous_queries: Optional[list],
     gift_context: Optional[dict],
 ) -> list:
-    """Resolve search queries from LLM or fallbacks. Runs even when parsed is None."""
+    """Resolve search queries. Trust LLM when it returns search_queries; use minimal fallbacks when omitted. No backend injection."""
     query_subtitles = []
     if isinstance(parsed, dict):
         sq_list = parsed.get("search_queries")
-        if isinstance(sq_list, list) and sq_list:
-            query_subtitles = _parse_search_queries(sq_list)
-        elif isinstance(parsed.get("search_query"), str):
-            sq = (parsed.get("search_query") or "").strip()
-            if sq:
-                query_subtitles = [(sq, "")]
-
-    if not query_subtitles:
-        reply_text = ""
-        if isinstance(parsed, dict):
-            reply_text = (parsed.get("reply") or "").strip()
-        if not reply_text and raw_text:
-            reply_text = raw_text.strip()
+        if "search_queries" in parsed:
+            if isinstance(sq_list, list) and sq_list:
+                query_subtitles = _parse_search_queries(sq_list)
+            elif isinstance(parsed.get("search_query"), str):
+                sq = (parsed.get("search_query") or "").strip()
+                if sq:
+                    query_subtitles = [(sq, "")]
+            else:
+                return []
+        else:
+            queries = _extract_search_queries_from_reply((parsed.get("reply") or "").strip() or raw_text.strip())
+            if not queries:
+                queries = _user_message_to_search_queries(message)
+            if not queries and isinstance(previous_queries, list) and previous_queries:
+                queries = [str(q).strip() for q in previous_queries[:3] if str(q).strip()]
+            if not queries and gift_context:
+                queries = _derive_queries_from_gift_context(gift_context)
+            query_subtitles = [(q, "") for q in queries if q]
+    else:
+        reply_text = raw_text.strip() if raw_text else ""
         queries = _extract_search_queries_from_reply(reply_text)
         if not queries:
             queries = _user_message_to_search_queries(message)
         if not queries and isinstance(previous_queries, list) and previous_queries:
-            if _is_constraint_revision(message):
-                queries = _merge_constraint_with_previous(message, previous_queries, gift_context)
-            if not queries:
-                queries = [str(q).strip() for q in previous_queries[:3] if str(q).strip()]
-        if not queries and (parsed or gift_context):
-            ctx = (parsed.get("gift_context") if isinstance(parsed, dict) else None) or gift_context
-            queries = _derive_queries_from_gift_context(ctx)
+            queries = [str(q).strip() for q in previous_queries[:3] if str(q).strip()]
+        if not queries and gift_context:
+            queries = _derive_queries_from_gift_context(gift_context)
         query_subtitles = [(q, "") for q in queries if q]
-    if query_subtitles and gift_context:
-        query_subtitles = [(_inject_gift_context_filters(q, gift_context), s) for q, s in query_subtitles]
     return query_subtitles
 
 
@@ -388,6 +318,7 @@ def gift_advisor_chat():
             context_bits.append(f"gift_context={json.dumps(gift_context, ensure_ascii=False)}")
         if isinstance(previous_queries, list) and previous_queries:
             context_bits.append(f"previous_search_queries={json.dumps(previous_queries)}")
+            context_bits.append("previous_products_shown=true")
 
         context_msg = "GIFT_CONTEXT: " + (", ".join(context_bits) if context_bits else "none")
 

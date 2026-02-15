@@ -114,12 +114,18 @@ def _parse_amazon_search_results(html: str, max_per_page: int = 5) -> List[dict]
             desc_el = card.select_one(".a-color-secondary.a-size-base")
             description = desc_el.get_text(strip=True)[:200] if desc_el else ""
             if title and (link or image):
+                r_num = None
+                if rating:
+                    import re
+                    m = re.search(r"([\d.]+)", str(rating))
+                    r_num = float(m.group(1)) if m else None
                 products.append({
                     "title": title,
                     "link": link,
                     "image": image,
                     "price": price,
-                    "description": description or rating,
+                    "rating": r_num,
+                    "reviews": None,
                 })
         except Exception:
             continue
@@ -169,13 +175,13 @@ def _serpapi_amazon_search(query: str, max_results: int = 5) -> List[dict]:
             price_str = str(price_val or "").strip()
         rating = item.get("rating")
         reviews = item.get("reviews")
-        desc = f"{rating} stars, {reviews} reviews" if (rating and reviews) else ""
         products.append({
             "title": (item.get("title") or "").strip(),
             "link": link,
             "image": (item.get("thumbnail") or item.get("image") or "").strip(),
             "price": price_str,
-            "description": desc,
+            "rating": rating,
+            "reviews": reviews,
         })
     return products
 
@@ -214,12 +220,15 @@ def _serper_search(query: str, max_results: int = 5, amazon_only: bool = True) -
             price_str = f"${price_val:.2f}" if price_val else ""
         else:
             price_str = str(price_val or "").strip()
+        rating = item.get("rating")
+        reviews = item.get("reviews")
         products.append({
             "title": (item.get("title") or item.get("name") or "").strip(),
             "link": link,
             "image": (item.get("image") or item.get("thumbnail") or item.get("imageUrl") or "").strip(),
             "price": price_str,
-            "description": (item.get("snippet") or item.get("description") or item.get("body") or "").strip()[:200],
+            "rating": rating,
+            "reviews": reviews,
         })
         if len(products) >= max_results:
             break
