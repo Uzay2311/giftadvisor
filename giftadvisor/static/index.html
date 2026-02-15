@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gift Advisor — Find the Perfect Gift</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ga-app" data-ga-app>
+    <header class="ga-header">
+      <div class="ga-header__inner">
+        <h1 class="ga-logo">Gift Advisor</h1>
+        <p class="ga-tagline">Find the perfect gift for every occasion</p>
+      </div>
+    </header>
+
+    <main class="ga-main">
+      <div class="ga-chat">
+        <div class="ga-chat__shell">
+          <div class="ga-chat__center">
+            <!-- Occasion selector (shown before/during chat) -->
+            <div class="ga-occasion" data-ga-occasion>
+              <p class="ga-occasion__label">What's the occasion?</p>
+              <div class="ga-occasion__chips" data-ga-chips>
+                <button type="button" class="ga-chip" data-occasion="birthday">Birthday</button>
+                <button type="button" class="ga-chip" data-occasion="anniversary">Anniversary</button>
+                <button type="button" class="ga-chip" data-occasion="wedding">Wedding</button>
+                <button type="button" class="ga-chip" data-occasion="holiday">Holiday</button>
+                <button type="button" class="ga-chip" data-occasion="graduation">Graduation</button>
+                <button type="button" class="ga-chip" data-occasion="baby-shower">Baby Shower</button>
+                <button type="button" class="ga-chip" data-occasion="housewarming">Housewarming</button>
+                <button type="button" class="ga-chip" data-occasion="thank-you">Thank You</button>
+                <button type="button" class="ga-chip" data-occasion="other">Other</button>
+              </div>
+            </div>
+
+            <!-- Hero (shown when no messages) -->
+            <div class="ga-hero" data-ga-hero>
+              <p class="ga-hero__text">Tell me about the recipient and I'll help you find something they'll love.</p>
+            </div>
+
+            <!-- Messages -->
+            <div class="ga-messages" data-ga-messages aria-live="polite"></div>
+          </div>
+
+          <footer class="ga-composer" role="region" aria-label="Message composer">
+            <form class="ga-form" data-ga-form>
+              <div class="ga-inputwrap">
+                <textarea
+                  class="ga-input"
+                  name="message"
+                  rows="1"
+                  placeholder="e.g. My mom loves gardening, budget around $50..."
+                  aria-label="Your message"
+                  data-ga-input
+                ></textarea>
+                <button class="ga-send" type="submit" data-ga-send aria-label="Send">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" fill="currentColor"/>
+                  </svg>
+                </button>
+              </div>
+            </form>
+          </footer>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

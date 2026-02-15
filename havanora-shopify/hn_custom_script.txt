@@ -1,0 +1,1604 @@
+(function () {
+  const app = document.querySelector('[data-hc-app]');
+  if (!app) return;
+
+  const messagesEl = app.querySelector('[data-hc-messages]');
+  const formEl = app.querySelector('[data-hc-form]');
+  const inputEl = app.querySelector('[data-hc-input]');
+  const root = app.querySelector('.hc-chat');
+  const chatsEl = app.querySelector('[data-hc-chats]');
+  const heroEl = app.querySelector('[data-hc-hero]');
+  const promptEl = app.querySelector('[data-hc-prompt]');
+
+  // Call button
+  const callBtn = app.querySelector('[data-hc-call]');
+
+  // Debug UI
+  const debugSectionEl = app.querySelector('[data-hc-debug]');
+  const debugTabsEl = app.querySelector('[data-hc-debug-tabs]');
+  const debugPaneEl = app.querySelector('[data-hc-debugpane]');
+  const debugPreEl = app.querySelector('[data-hc-debugpre]');
+
+  const ENDPOINT = "https://workiqapp.pythonanywhere.com/hn_chat_bot";
+
+  // Telemetry + threads read endpoints
+  const TELEMETRY_ENDPOINT = "https://workiqapp.pythonanywhere.com/hn_telemetry";
+  const READ_THREADS_ENDPOINT = "https://workiqapp.pythonanywhere.com/hn_read_customer_threads";
+
+  const FALLBACK_THREAD_TITLE_CHARS = 42;
+
+  /* =====================================================
+     QUICK REPLIES + PRESENCE
+     ===================================================== */
+
+  // Recommendation section removed for now (no quick reply chips).
+  function setStatus(text) {
+    const el = app.querySelector('[data-hc-status]');
+    if (!el) return;
+    el.textContent = String(text || '');
+  }
+
+  function formatLastSeen(iso) {
+    try {
+      const d = new Date(iso);
+      const now = new Date();
+      const diff = Math.max(0, now - d);
+      const mins = Math.floor(diff / 60000);
+      if (mins <= 0) return 'just now';
+      if (mins < 60) return `${mins}m ago`;
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return `${hrs}h ago`;
+      const days = Math.floor(hrs / 24);
+      return `${days}d ago`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /* =====================================================
+     SIDEBAR (MOBILE MENU + DESKTOP COLLAPSE)
+     ===================================================== */
+
+  const menuBtn = app.querySelector('[data-hc-menu]');
+  const overlayEl = app.querySelector('[data-hc-overlay]');
+  const sideEl = app.querySelector('[data-hc-side]');
+  const closeBtn = app.querySelector('[data-hc-close]');
+
+  function openSide() {
+    document.documentElement.classList.remove('hc-side-collapsed');
+    document.body.classList.remove('hc-side-collapsed');
+
+    document.documentElement.classList.add('hc-side-open');
+    document.body.classList.add('hc-side-open');
+    if (menuBtn) menuBtn.setAttribute('aria-expanded', 'true');
+    if (sideEl) sideEl.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeSide() {
+    if (isDesktop()) {
+      document.documentElement.classList.add('hc-side-collapsed');
+      document.body.classList.add('hc-side-collapsed');
+    }
+
+    document.documentElement.classList.remove('hc-side-open');
+    document.body.classList.remove('hc-side-open');
+    if (menuBtn) menuBtn.setAttribute('aria-expanded', 'false');
+    if (sideEl) sideEl.setAttribute('aria-hidden', 'true');
+  }
+
+  function isDesktop() {
+    return window.matchMedia && window.matchMedia('(min-width: 1024px)').matches;
+  }
+
+  function syncSideDefaultState() {
+    if (isDesktop()) {
+      const collapsed = document.documentElement.classList.contains('hc-side-collapsed') ||
+                        document.body.classList.contains('hc-side-collapsed');
+      if (!collapsed) openSide();
+      else closeSide();
+    } else {
+      document.documentElement.classList.remove('hc-side-collapsed');
+      document.body.classList.remove('hc-side-collapsed');
+      closeSide();
+    }
+  }
+
+  if (menuBtn) {
+    menuBtn.setAttribute('aria-expanded', 'false');
+    menuBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openSide();
+    }, { passive: false });
+    menuBtn.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openSide();
+    }, { passive: false });
+  }
+
+  if (closeBtn) {
+    closeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSide();
+    }, { passive: false });
+    closeBtn.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSide();
+    }, { passive: false });
+  }
+
+  if (overlayEl) {
+    overlayEl.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSide();
+    }, { passive: false });
+    overlayEl.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSide();
+    }, { passive: false });
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSide();
+  });
+
+  window.addEventListener('resize', () => {
+    syncSideDefaultState();
+  });
+
+  syncSideDefaultState();
+
+  /* =====================================================
+     DEBUG: Customer JSON tab + pane
+     ===================================================== */
+
+  let LAST_REMOTE_CUSTOMER = null;
+
+  function prettyJson(obj) {
+    try { return JSON.stringify(obj, null, 2); } catch (_) { return String(obj || ''); }
+  }
+
+  function hideDebugPane() {
+    if (debugPaneEl) debugPaneEl.style.display = 'none';
+    if (debugPreEl) debugPreEl.textContent = '';
+    if (debugTabsEl) {
+      const items = debugTabsEl.querySelectorAll('.hc-chatitem');
+      items.forEach(i => i.classList.remove('is-active'));
+    }
+  }
+
+  function showCustomerJsonPane() {
+    if (!debugPaneEl || !debugPreEl) return;
+    debugPreEl.textContent = prettyJson(LAST_REMOTE_CUSTOMER || null);
+    debugPaneEl.style.display = '';
+    if (debugTabsEl) {
+      const items = debugTabsEl.querySelectorAll('.hc-chatitem');
+      items.forEach(i => i.classList.remove('is-active'));
+      const btn = debugTabsEl.querySelector('[data-debug-tab="customer_json"]');
+      if (btn) btn.classList.add('is-active');
+    }
+  }
+
+  function renderDebugTabs() {
+    if (!debugSectionEl || !debugTabsEl) return;
+
+    debugSectionEl.style.display = '';
+    debugTabsEl.innerHTML = '';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'hc-chatitem';
+    btn.setAttribute('data-debug-tab', 'customer_json');
+
+    const title = document.createElement('div');
+    title.className = 'hc-chatitem__title';
+    title.textContent = 'customer json';
+
+    const meta = document.createElement('div');
+    meta.className = 'hc-chatitem__date';
+    meta.textContent = '';
+
+    btn.appendChild(title);
+    btn.appendChild(meta);
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      showCustomerJsonPane();
+      if (!isDesktop()) closeSide();
+    });
+
+    debugTabsEl.appendChild(btn);
+    hideDebugPane();
+  }
+
+  /* =====================================================
+     MOBILE: avoid auto-focusing keyboard after render
+     ===================================================== */
+
+  function isMobileLike() {
+    if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true;
+    return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  }
+
+  const shouldAutoFocus = !isMobileLike();
+
+  function focusComposerIfAllowed() {
+    if (!shouldAutoFocus) return;
+    try { inputEl.focus(); } catch (_) {}
+  }
+
+  inputEl.addEventListener('pointerdown', () => {
+    try { inputEl.focus(); } catch (_) {}
+  }, { passive: true });
+
+  inputEl.addEventListener('click', () => {
+    try { inputEl.focus(); } catch (_) {}
+  }, { passive: true });
+
+  /* =====================================================
+     HISTORY (localStorage, threads)
+     ===================================================== */
+
+  const STORAGE_KEY = 'hn_daily_chats_v2';
+  const MAX_HISTORY_TURNS = 12;
+
+  let activeThreadId = null;
+
+  function makeThreadId() {
+    const d = new Date();
+    const pad = (n, w = 2) => String(n).padStart(w, '0');
+    const ts =
+      d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    let rand = '';
+    try {
+      const bytes = new Uint8Array(8);
+      if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+      for (const b of bytes) rand += b.toString(16).padStart(2, '0');
+    } catch (_) {
+      rand = String(Math.random()).slice(2);
+    }
+    return `t_${ts}_${rand}`;
+  }
+
+  function readStore() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      const obj = raw ? JSON.parse(raw) : null;
+      if (!obj || typeof obj !== 'object') return { chats: {}, active_thread_id: null };
+      if (!obj.chats || typeof obj.chats !== 'object') obj.chats = {};
+      if (!('active_thread_id' in obj)) obj.active_thread_id = null;
+      return obj;
+    } catch (_) {
+      return { chats: {}, active_thread_id: null };
+    }
+  }
+
+  function writeStore(store) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    } catch (_) {}
+  }
+
+  function getThread(threadId) {
+    const store = readStore();
+    const t = store.chats && store.chats[threadId];
+    if (!t || typeof t !== 'object') return null;
+    if (!Array.isArray(t.messages)) t.messages = [];
+    return t;
+  }
+
+  function getThreadMessages(threadId) {
+    const t = getThread(threadId);
+    return (t && Array.isArray(t.messages)) ? t.messages : [];
+  }
+
+  function hasAnyUserMessage(threadId) {
+    const msgs = getThreadMessages(threadId);
+    return msgs.some(m => m && m.role === 'user' && String(m.content || '').trim());
+  }
+
+  function ensureThread(threadId) {
+    const store = readStore();
+    if (!store.chats[threadId]) {
+      store.chats[threadId] = {
+        thread_id: threadId,
+        thread_name: '',
+        thread_summary: '',
+        customer_profile: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        last_message_at: '',
+        messages: [],
+        pinned: false,
+      };
+    }
+    if (!Array.isArray(store.chats[threadId].messages)) store.chats[threadId].messages = [];
+    writeStore(store);
+  }
+
+  function appendToThread(threadId, role, content) {
+    const store = readStore();
+    if (!store.chats[threadId]) {
+      store.chats[threadId] = {
+        thread_id: threadId,
+        thread_name: '',
+        thread_summary: '',
+        customer_profile: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        last_message_at: '',
+        messages: [],
+        pinned: false,
+      };
+    }
+    if (!Array.isArray(store.chats[threadId].messages)) store.chats[threadId].messages = [];
+    store.chats[threadId].messages.push({ role, content: String(content || '') });
+    store.chats[threadId].updated_at = new Date().toISOString();
+    store.chats[threadId].last_message_at = new Date().toISOString();
+    writeStore(store);
+  }
+
+  function upsertThreadMeta(threadId, meta) {
+    const store = readStore();
+    if (!store.chats[threadId]) return;
+    const t = store.chats[threadId];
+    if (meta && typeof meta === 'object') {
+      if (typeof meta.thread_name === 'string') t.thread_name = meta.thread_name;
+      if (typeof meta.thread_summary === 'string') t.thread_summary = meta.thread_summary;
+      if (meta.customer_profile && typeof meta.customer_profile === 'object') t.customer_profile = meta.customer_profile;
+      if (typeof meta.fallback_title === 'string') t.fallback_title = meta.fallback_title;
+      if (typeof meta.pinned === 'boolean') t.pinned = meta.pinned;
+      t.updated_at = new Date().toISOString();
+    }
+    writeStore(store);
+  }
+
+  function setActiveThreadId(threadId) {
+    activeThreadId = threadId;
+    const store = readStore();
+    store.active_thread_id = threadId;
+    writeStore(store);
+  }
+
+  function listActiveThreadsDesc() {
+    const store = readStore();
+    const keys = Object.keys(store.chats || {});
+    const active = keys.filter(k => hasAnyUserMessage(k));
+
+    // pinned first, then recency
+    active.sort((a, b) => {
+      const ta = store.chats[a] || {};
+      const tb = store.chats[b] || {};
+      const pa = !!ta.pinned;
+      const pb = !!tb.pinned;
+      if (pa !== pb) return pa ? -1 : 1;
+
+      const la = (ta.last_message_at || ta.updated_at || '') || '';
+      const lb = (tb.last_message_at || tb.updated_at || '') || '';
+      return la < lb ? 1 : -1;
+    });
+
+    return active;
+  }
+
+  function getDefaultActiveThreadId() {
+    const store = readStore();
+    const saved = store.active_thread_id && String(store.active_thread_id).trim() ? String(store.active_thread_id).trim() : null;
+
+    if (saved && hasAnyUserMessage(saved)) return saved;
+
+    if (saved && getThread(saved) && !hasAnyUserMessage(saved)) {
+      return null;
+    }
+
+    const active = listActiveThreadsDesc();
+    return active.length ? active[0] : null;
+  }
+
+  function setHeroVisibility() {
+    if (!activeThreadId) {
+      if (heroEl) heroEl.style.display = '';
+      if (promptEl) promptEl.style.display = '';
+      return;
+    }
+    const msgs = getThreadMessages(activeThreadId).filter(m => m && (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim());
+    const shouldShow = msgs.length === 0;
+    if (heroEl) heroEl.style.display = shouldShow ? '' : 'none';
+    if (promptEl) promptEl.style.display = shouldShow ? '' : 'none';
+  }
+
+  /* =====================================================
+     TELEMETRY + REMOTE THREADS READ
+     ===================================================== */
+
+  const HN_UID_KEY = 'hn_uid_v1';
+  const HN_LOGIN_SYNC_KEY = 'hn_login_synced_v1';
+
+  function stableLocalId() {
+    try {
+      const existing = localStorage.getItem(HN_UID_KEY);
+      if (existing && String(existing).trim()) return String(existing).trim();
+
+      const parts = [
+        'v2',
+        location.origin || '',
+        navigator.userAgent || '',
+        navigator.language || '',
+        (navigator.languages && navigator.languages.join(',')) || '',
+        String(navigator.platform || ''),
+        String(navigator.hardwareConcurrency || ''),
+        String(navigator.deviceMemory || ''),
+        String((screen && screen.width) || '') + 'x' + String((screen && screen.height) || '') + 'x' + String((window.devicePixelRatio) || ''),
+        Intl && Intl.DateTimeFormat ? String(Intl.DateTimeFormat().resolvedOptions().timeZone || '') : '',
+      ].map(s => String(s || '')).join('|');
+
+      async function sha256Hex(str) {
+        const buf = new TextEncoder().encode(str);
+        const digest = await crypto.subtle.digest('SHA-256', buf);
+        const arr = Array.from(new Uint8Array(digest));
+        return arr.map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+
+      function fnv1a32(str) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < str.length; i++) {
+          h ^= str.charCodeAt(i);
+          h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+        }
+        return ('0000000' + h.toString(16)).slice(-8);
+      }
+
+      if (window.crypto && crypto.subtle && window.TextEncoder) {
+        return sha256Hex(parts).then(hex => {
+          const uid = 'hn_' + hex.slice(0, 32);
+          try { localStorage.setItem(HN_UID_KEY, uid); } catch (_) {}
+          return uid;
+        }).catch(() => {
+          const uid = 'hn_' + fnv1a32(parts);
+          try { localStorage.setItem(HN_UID_KEY, uid); } catch (_) {}
+          return uid;
+        });
+      }
+
+      const uid = 'hn_' + fnv1a32(parts);
+      try { localStorage.setItem(HN_UID_KEY, uid); } catch (_) {}
+      return uid;
+    } catch (_) {
+      return 'hn_anon';
+    }
+  }
+
+  let HN_UNIQUE_ID = 'hn_anon';
+
+  function getShopContext() {
+    const shop = (window.Shopify && Shopify.shop) ? Shopify.shop : '';
+
+    const customer_id =
+      (window.hnCustomer && (window.hnCustomer.id || window.hnCustomer.customer_id)) ? String(window.hnCustomer.id || window.hnCustomer.customer_id) :
+      (window.__STOREFRONT_CUSTOMER__ && window.__STOREFRONT_CUSTOMER__.id) ? String(window.__STOREFRONT_CUSTOMER__.id) :
+      '';
+    const customer_email =
+      (window.hnCustomer && window.hnCustomer.email) ? String(window.hnCustomer.email) :
+      (window.__STOREFRONT_CUSTOMER__ && window.__STOREFRONT_CUSTOMER__.email) ? String(window.__STOREFRONT_CUSTOMER__.email) :
+      '';
+
+    return { shop, customer_id, customer_email };
+  }
+
+  function signedInKey(ctx) {
+    const shop = String((ctx && ctx.shop) || '').trim();
+    const cid = String((ctx && ctx.customer_id) || '').trim();
+    const email = String((ctx && ctx.customer_email) || '').trim().toLowerCase();
+    if (!shop) return '';
+    if (cid) return `${shop}|cid|${cid}`;
+    if (email) return `${shop}|email|${email}`;
+    return '';
+  }
+
+  function getLoginSyncMarker(ctx) {
+    try {
+      const raw = localStorage.getItem(HN_LOGIN_SYNC_KEY);
+      const obj = raw ? JSON.parse(raw) : null;
+      const k = signedInKey(ctx);
+      if (!k || !obj || typeof obj !== 'object') return false;
+      return obj[k] === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setLoginSyncMarker(ctx) {
+    try {
+      const k = signedInKey(ctx);
+      if (!k) return;
+      const raw = localStorage.getItem(HN_LOGIN_SYNC_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      obj[k] = true;
+      localStorage.setItem(HN_LOGIN_SYNC_KEY, JSON.stringify(obj));
+    } catch (_) {}
+  }
+
+  async function readRemoteThreads(limit = 10) {
+    const ctx = getShopContext();
+    try {
+      const res = await fetch(READ_THREADS_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          unique_id: HN_UNIQUE_ID,
+          shop: ctx.shop,
+          customer_id: ctx.customer_id,
+          customer_email: ctx.customer_email,
+          limit: limit,
+        }),
+      });
+      if (!res.ok) return { device_id: '', customer: null, threads: [] };
+      const data = await res.json().catch(() => ({}));
+      return {
+        device_id: data.device_id || '',
+        customer: data.customer || null,
+        threads: Array.isArray(data.threads) ? data.threads : [],
+      };
+    } catch (_) {
+      return { device_id: '', customer: null, threads: [] };
+    }
+  }
+
+  async function touchTelemetryOnce() {
+    const ctx = getShopContext();
+    try {
+      await fetch(TELEMETRY_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          unique_id: HN_UNIQUE_ID,
+          shop: ctx.shop,
+          customer_id: ctx.customer_id,
+          customer_email: ctx.customer_email,
+          event: 'session',
+        }),
+      });
+    } catch (_) {}
+  }
+
+  async function touchRemoteThread(threadId, threadName) {
+    const ctx = getShopContext();
+    try {
+      await fetch(TELEMETRY_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          unique_id: HN_UNIQUE_ID,
+          shop: ctx.shop,
+          customer_id: ctx.customer_id,
+          customer_email: ctx.customer_email,
+          event: 'thread_touch',
+          thread_id: String(threadId || ''),
+          thread_name: String(threadName || ''),
+        }),
+      });
+    } catch (_) {}
+  }
+
+  async function writeTelemetryAppendMessage(threadId, role, content, meta) {
+    const ctx = getShopContext();
+    const payload = {
+      unique_id: HN_UNIQUE_ID,
+      shop: ctx.shop,
+      customer_id: ctx.customer_id,
+      customer_email: ctx.customer_email,
+      event: 'message',
+      thread_id: String(threadId || ''),
+      thread_name: String((meta && meta.thread_name) || ''),
+      message: { role: String(role || ''), content: String(content || '') },
+    };
+    if (meta && typeof meta.thread_summary === 'string' && meta.thread_summary.trim()) payload.thread_summary = meta.thread_summary.trim();
+    if (meta && meta.customer_profile && typeof meta.customer_profile === 'object') payload.customer_profile = meta.customer_profile;
+
+    try {
+      await fetch(TELEMETRY_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (_) {}
+  }
+
+  async function writeTelemetryMeta(threadId, meta) {
+    const ctx = getShopContext();
+    const payload = {
+      unique_id: HN_UNIQUE_ID,
+      shop: ctx.shop,
+      customer_id: ctx.customer_id,
+      customer_email: ctx.customer_email,
+      event: 'thread_meta',
+      thread_id: String(threadId || ''),
+      thread_name: String((meta && meta.thread_name) || ''),
+    };
+    if (meta && typeof meta.thread_summary === 'string' && meta.thread_summary.trim()) payload.thread_summary = meta.thread_summary.trim();
+    if (meta && meta.customer_profile && typeof meta.customer_profile === 'object') payload.customer_profile = meta.customer_profile;
+
+    try {
+      await fetch(TELEMETRY_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (_) {}
+  }
+
+  async function migrateAnonymousHistoryToCustomer() {
+    const ctx = getShopContext();
+    const hasCustomer = String(ctx.customer_id || '').trim() || String(ctx.customer_email || '').trim();
+    if (!hasCustomer) return;
+    if (getLoginSyncMarker(ctx)) return;
+
+    const store = readStore();
+    const chats = (store && store.chats && typeof store.chats === 'object') ? store.chats : {};
+    const threadIds = Object.keys(chats);
+
+    for (const tid of threadIds) {
+      const t = chats[tid];
+      if (!t || typeof t !== 'object') continue;
+
+      const msgs = Array.isArray(t.messages) ? t.messages : [];
+      const anyUser = msgs.some(m => m && m.role === 'user' && String(m.content || '').trim());
+      if (!anyUser) continue;
+
+      await touchRemoteThread(tid, String(t.thread_name || ''));
+
+      await writeTelemetryMeta(tid, {
+        thread_name: String(t.thread_name || ''),
+        thread_summary: String(t.thread_summary || ''),
+        customer_profile: (t.customer_profile && typeof t.customer_profile === 'object') ? t.customer_profile : null,
+      });
+
+      for (const m of msgs) {
+        if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+        const c = String(m.content || '').trim();
+        if (!c) continue;
+        await writeTelemetryAppendMessage(tid, m.role, c, {
+          thread_name: String(t.thread_name || ''),
+          thread_summary: String(t.thread_summary || ''),
+          customer_profile: (t.customer_profile && typeof t.customer_profile === 'object') ? t.customer_profile : null,
+        });
+      }
+    }
+
+    setLoginSyncMarker(ctx);
+  }
+
+  /* =====================================================
+     SCROLL ENGINE
+     ===================================================== */
+
+  let followBottom = false;
+  let rafId = null;
+  let observer = null;
+
+  const sentinel = document.createElement('div');
+  sentinel.style.height = '1px';
+
+  function ensureSentinel() {
+    if (!messagesEl.contains(sentinel)) {
+      messagesEl.appendChild(sentinel);
+    }
+  }
+
+  function scrollViewportToBottom() {
+    ensureSentinel();
+    sentinel.scrollIntoView({ behavior: 'auto', block: 'end' });
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
+      behavior: 'auto',
+    });
+  }
+
+  function forceScrollMultiPass() {
+    scrollViewportToBottom();
+    requestAnimationFrame(scrollViewportToBottom);
+    setTimeout(scrollViewportToBottom, 0);
+    setTimeout(scrollViewportToBottom, 50);
+    setTimeout(scrollViewportToBottom, 150);
+  }
+
+  function startFollow() {
+    followBottom = true;
+    forceScrollMultiPass();
+
+    if (!observer) {
+      observer = new MutationObserver(() => {
+        if (followBottom) forceScrollMultiPass();
+      });
+      observer.observe(messagesEl, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+
+    const loop = () => {
+      if (!followBottom) return;
+      scrollViewportToBottom();
+      rafId = requestAnimationFrame(loop);
+    };
+    rafId = requestAnimationFrame(loop);
+  }
+
+  function stopFollow() {
+    followBottom = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = null;
+    if (observer) observer.disconnect();
+    observer = null;
+  }
+
+  /* =====================================================
+     TEXT + RENDER
+     ===================================================== */
+
+  function normalize(text) {
+    return String(text || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\\n/g, '\n')
+      .trim();
+  }
+
+  function stripJsonWrapperIfPresent(text) {
+    // Backend returns JSON, streaming deltas may be raw JSON chunks.
+    // We only want the assistant "reply" text.
+    const t = String(text || '');
+    const s = t.trim();
+    if (!s) return '';
+
+    // If it's a full JSON object, extract reply.
+    if (s.startsWith('{') && s.endsWith('}')) {
+      try {
+        const obj = JSON.parse(s);
+        if (obj && typeof obj === 'object') {
+          if (typeof obj.reply === 'string') return String(obj.reply);
+          if (typeof obj.text === 'string') return String(obj.text);
+        }
+      } catch (_) {}
+    }
+
+    // Streaming case: accumulate chunks could include `"reply":"...`
+    const idx = s.indexOf('"reply"');
+    if (idx >= 0) {
+      const after = s.slice(idx);
+      const m = after.match(/"reply"\s*:\s*"([\s\S]*)/);
+      if (m && m[1] != null) {
+        // still incomplete; return best effort decoded portion (till last quote if any)
+        let cand = m[1];
+        const lastQuote = cand.lastIndexOf('"');
+        if (lastQuote > 0) cand = cand.slice(0, lastQuote);
+        try {
+          // re-wrap to decode escapes
+          return JSON.parse('"' + cand.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"');
+        } catch (_) {
+          // best effort unescape
+          return cand
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\')
+            .replace(/\\n/g, '\n')
+            .replace(/\\t/g, '\t');
+        }
+      }
+    }
+
+    return t;
+  }
+
+  function clearMessagesUI() {
+    messagesEl.innerHTML = '';
+    ensureSentinel();
+    messagesEl.appendChild(sentinel);
+  }
+
+  function renderMessage(role, text) {
+    const row = document.createElement('div');
+    row.className = `hc-msg hc-msg--${role}`;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'hc-msg__wrap';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'hc-msg__bubble';
+    bubble.textContent = normalize(stripJsonWrapperIfPresent(text));
+    bubble.style.whiteSpace = 'pre-wrap';
+
+    // Bring back "... " rendering (fade-in) + allow typing animation to update text
+    bubble.classList.add('hc-anim-in');
+
+    // simple delivery/typing cues via dataset (optional, safe)
+    bubble.dataset.state = 'sent';
+
+    wrap.appendChild(bubble);
+    row.appendChild(wrap);
+    messagesEl.appendChild(row);
+
+    ensureSentinel();
+    messagesEl.appendChild(sentinel);
+    forceScrollMultiPass();
+
+    return bubble;
+  }
+
+  function renderTypingIndicator() {
+    const row = document.createElement('div');
+    row.className = 'hc-msg hc-msg--assistant';
+
+    const wrap = document.createElement('div');
+    wrap.className = 'hc-msg__wrap';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'hc-msg__bubble';
+
+    const typing = document.createElement('div');
+    typing.className = 'hc-typing';
+    typing.innerHTML = '<span class="hc-typing__dot"></span><span class="hc-typing__dot"></span><span class="hc-typing__dot"></span>';
+
+    bubble.appendChild(typing);
+    bubble.dataset.state = 'typing';
+    bubble.classList.add('hc-anim-in');
+
+    wrap.appendChild(bubble);
+    row.appendChild(wrap);
+    messagesEl.appendChild(row);
+
+    ensureSentinel();
+    messagesEl.appendChild(sentinel);
+    forceScrollMultiPass();
+
+    return { row, bubble };
+  }
+
+  function buildHistoryForBackend(threadId) {
+    if (!threadId) return [];
+    const msgs = getThreadMessages(threadId)
+      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && String(m.content || '').trim());
+
+    const trimmed = msgs.slice(-MAX_HISTORY_TURNS);
+    return trimmed.map(m => ({ role: m.role, content: String(m.content) }));
+  }
+
+  function countAssistantMessages(threadId) {
+    const msgs = getThreadMessages(threadId);
+    return msgs.filter(m => m && m.role === 'assistant' && String(m.content || '').trim()).length;
+  }
+
+  async function callBackendStream(msg, onDelta, onFinal) {
+    const ctx = getShopContext();
+
+    const history = activeThreadId ? buildHistoryForBackend(activeThreadId) : [];
+    const t = activeThreadId ? (getThread(activeThreadId) || {}) : {};
+
+    const payload = {
+      message: msg,
+      history: history,
+      day_key: activeThreadId || '',
+      shop: ctx.shop,
+      customer_id: ctx.customer_id,
+      customer_email: ctx.customer_email,
+      unique_id: HN_UNIQUE_ID,
+      customer_profile: (t && t.customer_profile) ? t.customer_profile : null,
+      thread_summary: (t && typeof t.thread_summary === 'string') ? t.thread_summary : '',
+      thread_title: (t && typeof t.thread_name === 'string') ? t.thread_name : '',
+      assistant_message_count: activeThreadId ? countAssistantMessages(activeThreadId) : 0,
+      request_greeting: true,
+      stream: true,
+    };
+
+    const res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok || !res.body) {
+      const t = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+
+    let buffer = '';
+    let done = false;
+
+    function parseSseChunk(chunk) {
+      buffer += chunk;
+
+      // Split on double newlines (SSE message delimiter)
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const p of parts) {
+        const lines = p.split('\n');
+        let event = 'message';
+        let data = '';
+        for (const line of lines) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+
+        let obj = null;
+        try { obj = JSON.parse(data); } catch (_) { obj = null; }
+
+        if (event === 'delta' && obj && typeof obj.text === 'string') {
+          const clean = String(obj.text || '');
+          if (clean) onDelta(clean);
+        } else if (event === 'final' && obj && typeof obj === 'object') {
+          onFinal(obj);
+        }
+      }
+    }
+
+    while (!done) {
+      const r = await reader.read();
+      done = !!r.done;
+      const chunk = decoder.decode(r.value || new Uint8Array(), { stream: !done });
+      if (chunk) parseSseChunk(chunk);
+    }
+  }
+
+  /* =====================================================
+     SIDEBAR TABS + NEW CHAT BUTTON + SEARCH + PIN
+     ===================================================== */
+
+  function shortFallbackTitleFromText(text, n = FALLBACK_THREAD_TITLE_CHARS) {
+    const t = normalize(text).replace(/\s+/g, ' ').trim();
+    if (!t) return 'New chat';
+    if (t.length <= n) return t;
+    return t.slice(0, n).trimEnd() + '…';
+  }
+
+  function displayTitleForThread(threadId) {
+    const t = getThread(threadId);
+    if (t && typeof t.thread_name === 'string' && t.thread_name.trim()) return t.thread_name.trim();
+    if (t && typeof t.fallback_title === 'string' && t.fallback_title.trim()) return t.fallback_title.trim();
+    return 'New chat';
+  }
+
+  function ensureSearchBar() {
+    if (!chatsEl) return null;
+    let wrap = app.querySelector('[data-hc-searchwrap]');
+    if (wrap) return wrap;
+
+    wrap = document.createElement('div');
+    wrap.setAttribute('data-hc-searchwrap', '');
+    wrap.style.display = 'flex';
+    wrap.style.gap = '8px';
+    wrap.style.alignItems = 'center';
+    wrap.style.padding = '6px 6px 10px';
+
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.placeholder = 'search chats';
+    input.setAttribute('data-hc-search', '');
+    input.style.width = '100%';
+    input.style.padding = '10px 10px';
+    input.style.borderRadius = '12px';
+    input.style.border = '1px solid rgba(11,15,25,0.10)';
+    input.style.background = 'rgba(11,15,25,0.03)';
+    input.style.outline = 'none';
+    input.style.fontSize = '13px';
+
+    wrap.appendChild(input);
+
+    // Insert at top of chats section container
+    chatsEl.parentElement.insertBefore(wrap, chatsEl);
+
+    return wrap;
+  }
+
+  function getSearchQuery() {
+    const el = app.querySelector('[data-hc-search]');
+    return el ? String(el.value || '').trim().toLowerCase() : '';
+  }
+
+  function renderSidebar() {
+    if (!chatsEl) return;
+
+    ensureSearchBar();
+    const searchEl = app.querySelector('[data-hc-search]');
+    if (searchEl && !searchEl._hnBound) {
+      searchEl._hnBound = true;
+      searchEl.addEventListener('input', () => renderSidebar());
+    }
+
+    chatsEl.innerHTML = '';
+
+    const newBtn = document.createElement('button');
+    newBtn.type = 'button';
+    newBtn.className = 'hc-chatitem';
+    newBtn.style.border = '1px solid rgba(11,15,25,0.12)';
+    newBtn.style.background = 'rgba(17,24,39,0.03)';
+
+    const newTitle = document.createElement('div');
+    newTitle.className = 'hc-chatitem__title';
+    newTitle.textContent = '+ New chat';
+
+    const newMeta = document.createElement('div');
+    newMeta.className = 'hc-chatitem__date';
+    newMeta.textContent = '';
+
+    newBtn.appendChild(newTitle);
+    newBtn.appendChild(newMeta);
+
+    newBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+
+      hideDebugPane();
+
+      if (activeThreadId && !hasAnyUserMessage(activeThreadId) && getThreadMessages(activeThreadId).length === 0) {
+        clearMessagesUI();
+        setHeroVisibility();
+        forceScrollMultiPass();
+        if (!isDesktop()) closeSide();
+        return;
+      }
+
+      setActiveThreadId(null);
+      clearMessagesUI();
+      setHeroVisibility();
+      forceScrollMultiPass();
+      renderSidebar();
+      if (!isDesktop()) closeSide();
+    });
+
+    chatsEl.appendChild(newBtn);
+
+    const q = getSearchQuery();
+    const threads = listActiveThreadsDesc().filter(tid => {
+      if (!q) return true;
+      const t = getThread(tid) || {};
+      const title = displayTitleForThread(tid).toLowerCase();
+      const summary = String(t.thread_summary || '').toLowerCase();
+      return title.includes(q) || summary.includes(q);
+    });
+
+    if (!threads.length) return;
+
+    for (const tid of threads) {
+      const t = getThread(tid) || {};
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'hc-chatitem' + (tid === activeThreadId ? ' is-active' : '');
+      btn.setAttribute('data-thread', tid);
+
+      const title = document.createElement('div');
+      title.className = 'hc-chatitem__title';
+      title.textContent = displayTitleForThread(tid);
+
+      const date = document.createElement('div');
+      date.className = 'hc-chatitem__date';
+      date.textContent = t && t.pinned ? 'pinned' : '';
+
+      btn.appendChild(title);
+      btn.appendChild(date);
+
+      // Pin toggle via right click / long press
+      btn.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        const next = !t.pinned;
+        upsertThreadMeta(tid, { pinned: next });
+        renderSidebar();
+      });
+
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        hideDebugPane();
+        switchToThread(tid);
+        if (!isDesktop()) closeSide();
+      });
+
+      chatsEl.appendChild(btn);
+    }
+  }
+
+  function renderStoredThread(threadId) {
+    clearMessagesUI();
+    const msgs = getThreadMessages(threadId);
+    for (const m of msgs) {
+      if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+      const content = normalize(m.content);
+      if (!content) continue;
+      renderMessage(m.role, content);
+    }
+    setHeroVisibility();
+    forceScrollMultiPass();
+  }
+
+  function switchToThread(threadId) {
+    setActiveThreadId(threadId);
+    renderSidebar();
+    renderStoredThread(activeThreadId);
+  }
+
+  /* =====================================================
+     SEND LOGIC (STREAMING) + CHATGPT-LIKE TYPING EFFECT
+     ===================================================== */
+
+  let sending = false;
+
+  // ChatGPT-like typing (SLOWER + word-ish bursts + pauses)
+  const TYPE_BASE_INTERVAL_MS = 115;  // slower
+  const TYPE_MIN_INTERVAL_MS  = 70;
+  const TYPE_MAX_INTERVAL_MS  = 340;
+
+  const TYPE_CHUNK_MIN = 1;
+  const TYPE_CHUNK_MAX = 2;          // smaller chunks => slower reveal
+
+  const INITIAL_DOT_MIN_MS = 1100;   // keep dots visible longer before first char
+  const INITIAL_DOT_MAX_MS = 2200;
+
+  const STREAM_DONE_GRACE_MS = 7000; // allow more time for typing to finish before snap-to-final
+
+  // NEW: throttle how fast we process incoming stream deltas (prevents "all at once" burst rendering)
+  const STREAM_BUFFER_FLUSH_MS = 120;
+  const STREAM_MAX_CHARS_PER_FLUSH = 32;
+
+  function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function isWhitespace(ch) {
+    return ch === ' ' || ch === '\n' || ch === '\t' || ch === '\r';
+  }
+
+  function nextWordishChunk(pending) {
+    if (!pending) return '';
+
+    // Always at least 1 char
+    let max = clamp(pending.length, TYPE_CHUNK_MIN, TYPE_CHUNK_MAX);
+
+    // If first char is whitespace, emit a tiny bit so it doesn't "stall"
+    if (isWhitespace(pending[0])) {
+      let i = 0;
+      while (i < max && i < pending.length && isWhitespace(pending[i])) i++;
+      return pending.slice(0, Math.max(1, i));
+    }
+
+    // Prefer completing a word up to max; if no space within max, just take max.
+    const slice = pending.slice(0, max);
+    const lastSpace = Math.max(slice.lastIndexOf(' '), slice.lastIndexOf('\n'), slice.lastIndexOf('\t'));
+    if (lastSpace >= 2) return pending.slice(0, lastSpace + 1); // include the space to feel natural
+
+    return slice;
+  }
+
+  function computeNextDelay(emittedChar, justEmitted) {
+    // punctuation pauses
+    const last = emittedChar || '';
+    let delay = TYPE_BASE_INTERVAL_MS + rand(-10, 44);
+
+    if (last === '\n') delay += rand(220, 420);
+    if (last === '.' || last === '!' || last === '?') delay += rand(260, 520);
+    if (last === ',' || last === ';' || last === ':') delay += rand(140, 260);
+
+    // occasional micro-pause (like "thinking")
+    if (justEmitted && Math.random() < 0.08) delay += rand(180, 420);
+
+    return clamp(delay, TYPE_MIN_INTERVAL_MS, TYPE_MAX_INTERVAL_MS);
+  }
+
+  async function sendMessage() {
+    if (sending) return;
+
+    const text = normalize(inputEl.value);
+    if (!text) return;
+
+    sending = true;
+    inputEl.value = '';
+
+    startFollow();
+    setStatus('typing…');
+
+    if (!activeThreadId) {
+      const newId = makeThreadId();
+      setActiveThreadId(newId);
+      ensureThread(activeThreadId);
+
+      upsertThreadMeta(activeThreadId, { fallback_title: shortFallbackTitleFromText(text) });
+      renderSidebar();
+
+      await touchRemoteThread(activeThreadId, '');
+    } else {
+      ensureThread(activeThreadId);
+    }
+
+    setHeroVisibility();
+
+    const userBubble = renderMessage('user', text);
+    userBubble.dataset.state = 'sent';
+    appendToThread(activeThreadId, 'user', text);
+
+    renderSidebar();
+
+    const localThread = getThread(activeThreadId) || {};
+    await writeTelemetryAppendMessage(activeThreadId, 'user', text, {
+      thread_name: localThread.thread_name || '',
+      thread_summary: localThread.thread_summary || '',
+      customer_profile: localThread.customer_profile || null,
+    });
+
+    // show typing dots first, then swap to text bubble on first typed content
+    const typing = renderTypingIndicator();
+    let bubble = null;
+    let replacedTyping = false;
+
+    function ensureAssistantBubble() {
+      if (bubble) return bubble;
+
+      bubble = document.createElement('div');
+      bubble.className = 'hc-msg__bubble';
+      bubble.textContent = '';
+      bubble.style.whiteSpace = 'pre-wrap';
+      bubble.dataset.state = 'streaming';
+      bubble.classList.add('hc-anim-in');
+
+      if (typing && typing.row && typing.row.parentNode) {
+        const row = document.createElement('div');
+        row.className = 'hc-msg hc-msg--assistant';
+
+        const wrap = document.createElement('div');
+        wrap.className = 'hc-msg__wrap';
+        wrap.appendChild(bubble);
+        row.appendChild(wrap);
+
+        typing.row.parentNode.replaceChild(row, typing.row);
+        replacedTyping = true;
+      } else {
+        // fallback
+        renderMessage('assistant', '');
+      }
+
+      ensureSentinel();
+      messagesEl.appendChild(sentinel);
+      forceScrollMultiPass();
+      return bubble;
+    }
+
+    // incremental typing state
+    let streamed = '';
+    let pending = '';
+    let typingTimer = null;
+
+    // NEW: incoming stream buffer (throttled into pending)
+    let incomingBuf = '';
+    let incomingFlushTimer = null;
+
+    // ensure we show dots a bit before first char (ChatGPT feel)
+    const firstCharAt = Date.now() + rand(INITIAL_DOT_MIN_MS, INITIAL_DOT_MAX_MS);
+    let typedAny = false;
+
+    function scheduleTick(delayMs) {
+      if (typingTimer) return;
+      typingTimer = setTimeout(() => {
+        typingTimer = null;
+        tickTyping();
+      }, delayMs);
+    }
+
+    function flushIncomingToPending() {
+      if (!incomingBuf) return;
+      const take = incomingBuf.slice(0, STREAM_MAX_CHARS_PER_FLUSH);
+      incomingBuf = incomingBuf.slice(take.length);
+      pending += take;
+
+      if (incomingBuf) {
+        incomingFlushTimer = setTimeout(() => {
+          incomingFlushTimer = null;
+          flushIncomingToPending();
+          if (!typingTimer) scheduleTick(clamp(TYPE_BASE_INTERVAL_MS + rand(10, 60), 60, 220));
+        }, STREAM_BUFFER_FLUSH_MS);
+      }
+    }
+
+    function tickTyping() {
+      const now = Date.now();
+
+      // Keep dots visible a moment before first char
+      if (!typedAny && (pending || incomingBuf) && now < firstCharAt) {
+        scheduleTick(clamp(firstCharAt - now, 60, 420));
+        return;
+      }
+
+      // If we have no pending, try to flush from incoming buffer
+      if (!pending && incomingBuf) {
+        flushIncomingToPending();
+      }
+
+      if (!pending) return;
+
+      const chunk = nextWordishChunk(pending);
+      pending = pending.slice(chunk.length);
+      streamed += chunk;
+
+      typedAny = true;
+
+      const b = ensureAssistantBubble();
+      b.textContent = normalize(streamed);
+      b.dataset.state = 'streaming';
+      scrollViewportToBottom();
+
+      const lastChar = chunk ? chunk[chunk.length - 1] : '';
+      const delay = computeNextDelay(lastChar, chunk.length > 0);
+      scheduleTick(delay);
+
+      // If there's still buffered stream content but nothing scheduled to flush it, ensure it gets flushed
+      if (incomingBuf && !incomingFlushTimer) {
+        incomingFlushTimer = setTimeout(() => {
+          incomingFlushTimer = null;
+          flushIncomingToPending();
+          if (!typingTimer) scheduleTick(clamp(TYPE_BASE_INTERVAL_MS + rand(10, 60), 60, 220));
+        }, STREAM_BUFFER_FLUSH_MS);
+      }
+    }
+
+    const onDelta = (d) => {
+      // IMPORTANT: do not normalize away mid-stream spaces/newlines
+      const clean = String(stripJsonWrapperIfPresent(d) || '').replace(/\r\n/g, '\n').replace(/\\n/g, '\n');
+      if (!clean) return;
+
+      // NEW: buffer stream deltas; do not dump all into pending at once
+      incomingBuf += clean;
+
+      if (!incomingFlushTimer) {
+        incomingFlushTimer = setTimeout(() => {
+          incomingFlushTimer = null;
+          flushIncomingToPending();
+          if (!typingTimer) {
+            const now = Date.now();
+            const delay = typedAny ? clamp(TYPE_BASE_INTERVAL_MS + rand(20, 120), 70, 320)
+                                  : clamp(firstCharAt - now, 60, 520);
+            scheduleTick(delay);
+          }
+        }, STREAM_BUFFER_FLUSH_MS);
+      } else {
+        // ensure typing starts if it hasn't yet
+        if (!typingTimer) {
+          const now = Date.now();
+          const delay = typedAny ? clamp(TYPE_BASE_INTERVAL_MS + rand(20, 120), 70, 320)
+                                : clamp(firstCharAt - now, 60, 520);
+          scheduleTick(delay);
+        }
+      }
+    };
+
+    let finalPayload = null;
+    const onFinal = (obj) => { finalPayload = obj; };
+
+    try {
+      await callBackendStream(text, onDelta, onFinal);
+
+      // Let pending type out a bit before snapping to final
+      const waitForTyping = async () => {
+        const start = Date.now();
+        while ((pending || incomingBuf || typingTimer || incomingFlushTimer) && (Date.now() - start) < STREAM_DONE_GRACE_MS) {
+          await new Promise(r => setTimeout(r, 80));
+        }
+      };
+      await waitForTyping();
+
+      if (incomingFlushTimer) {
+        clearTimeout(incomingFlushTimer);
+        incomingFlushTimer = null;
+      }
+      if (typingTimer) {
+        clearTimeout(typingTimer);
+        typingTimer = null;
+      }
+
+      // Final drain
+      if (incomingBuf) {
+        pending += incomingBuf;
+        incomingBuf = '';
+      }
+      if (pending) {
+        streamed += pending;
+        pending = '';
+      }
+
+      const resp = finalPayload || {};
+      const reply = normalize(resp.reply || streamed || '');
+      const returnedProfile = (resp.customer_profile && typeof resp.customer_profile === 'object') ? resp.customer_profile : null;
+      const returnedSummary = (typeof resp.thread_summary === 'string') ? resp.thread_summary.trim() : '';
+      const returnedTitle = (typeof resp.thread_title === 'string') ? resp.thread_title.trim() : '';
+
+      const b = ensureAssistantBubble();
+      b.textContent = reply || '[No content returned]';
+      b.dataset.state = 'delivered';
+
+      appendToThread(activeThreadId, 'assistant', reply || '[No content returned]');
+
+      const assistantCountNow = countAssistantMessages(activeThreadId);
+      const canUpdateTitle = assistantCountNow <= 10;
+
+      const nextMeta = {};
+      if (returnedProfile) nextMeta.customer_profile = returnedProfile;
+      if (returnedSummary) nextMeta.thread_summary = returnedSummary;
+
+      if (canUpdateTitle && returnedTitle) {
+        nextMeta.thread_name = returnedTitle;
+        nextMeta.fallback_title = '';
+      }
+
+      if (Object.keys(nextMeta).length) {
+        upsertThreadMeta(activeThreadId, nextMeta);
+        await writeTelemetryMeta(activeThreadId, {
+          thread_name: nextMeta.thread_name || (getThread(activeThreadId) || {}).thread_name || '',
+          thread_summary: nextMeta.thread_summary || (getThread(activeThreadId) || {}).thread_summary || '',
+          customer_profile: nextMeta.customer_profile || (getThread(activeThreadId) || {}).customer_profile || null,
+        });
+      }
+
+      const tNow = getThread(activeThreadId) || {};
+      await writeTelemetryAppendMessage(activeThreadId, 'assistant', reply || '[No content returned]', {
+        thread_name: tNow.thread_name || '',
+        thread_summary: tNow.thread_summary || '',
+        customer_profile: tNow.customer_profile || null,
+      });
+
+      setStatus('delivered');
+
+      renderSidebar();
+    } catch (e) {
+      if (!replacedTyping && typing && typing.row && typing.row.parentNode) {
+        typing.row.parentNode.removeChild(typing.row);
+      }
+      const errBubble = renderMessage('assistant', 'Something went wrong. Please try again.');
+      errBubble.style.color = 'rgba(239,68,68,0.95)';
+      errBubble.dataset.state = 'error';
+      setStatus('error');
+      console.error(e);
+    } finally {
+      stopFollow();
+      forceScrollMultiPass();
+      sending = false;
+      setTimeout(() => {
+        setStatus('last seen: just now');
+      }, 200);
+      focusComposerIfAllowed();
+    }
+  }
+
+  /* =====================================================
+     CALL BUTTON (coming soon)
+     ===================================================== */
+
+  if (callBtn) {
+    callBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      renderMessage('assistant', "we're working on voice calls, coming soon...");
+      setHeroVisibility();
+      forceScrollMultiPass();
+    }, { passive: false });
+  }
+
+  /* =====================================================
+     BOOT
+     ===================================================== */
+
+  (async function boot() {
+    renderDebugTabs();
+
+    if (heroEl) heroEl.style.visibility = 'hidden';
+
+    const maybePromise = stableLocalId();
+    if (maybePromise && typeof maybePromise.then === 'function') {
+      HN_UNIQUE_ID = await maybePromise;
+    } else {
+      HN_UNIQUE_ID = String(maybePromise || 'hn_anon');
+    }
+
+    await migrateAnonymousHistoryToCustomer();
+
+    const remote = await readRemoteThreads(10);
+
+    LAST_REMOTE_CUSTOMER = (remote && remote.customer) ? remote.customer : null;
+
+    touchTelemetryOnce();
+
+    if (remote && Array.isArray(remote.threads) && remote.threads.length) {
+      const store = readStore();
+      if (!store.chats || typeof store.chats !== 'object') store.chats = {};
+      for (const t of remote.threads) {
+        const tid = String((t && t.thread_id) || '').trim();
+        if (!tid) continue;
+
+        if (!store.chats[tid] || typeof store.chats[tid] !== 'object') {
+          store.chats[tid] = {
+            thread_id: tid,
+            thread_name: String((t && t.thread_name) || '').trim(),
+            thread_summary: '',
+            customer_profile: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            last_message_at: String((t && t.last_message_at) || '').trim(),
+            messages: [],
+            fallback_title: '',
+            pinned: false,
+          };
+        } else {
+          if (!Array.isArray(store.chats[tid].messages)) store.chats[tid].messages = [];
+          if (String((t && t.thread_name) || '').trim() && !String(store.chats[tid].thread_name || '').trim()) {
+            store.chats[tid].thread_name = String(t.thread_name).trim();
+          }
+          if (String((t && t.last_message_at) || '').trim()) store.chats[tid].last_message_at = String(t.last_message_at).trim();
+          if (typeof store.chats[tid].pinned !== 'boolean') store.chats[tid].pinned = false;
+        }
+      }
+      writeStore(store);
+    }
+
+    if (promptEl) {
+      const prof = remote && remote.customer && remote.customer.customer_profile ? remote.customer.customer_profile : null;
+      const preferredName =
+        prof && prof.identity && (prof.identity.preferred_name || prof.identity.first_name) ? (prof.identity.preferred_name || prof.identity.first_name) : '';
+      promptEl.textContent = preferredName ? `hey ${String(preferredName).trim()}` : 'hey there';
+    }
+
+    // presence: last seen (from server customer record when available)
+    const lastSeen = remote && remote.customer && remote.customer.last_seen_at ? String(remote.customer.last_seen_at) : '';
+    if (lastSeen) setStatus(`last seen: ${formatLastSeen(lastSeen)}`);
+    else setStatus('');
+
+    const sessionKey = 'hn_session_started_v1';
+    const alreadyMarked = sessionStorage.getItem(sessionKey) === '1';
+    if (!alreadyMarked) sessionStorage.setItem(sessionKey, '1');
+
+    if (!alreadyMarked) {
+      setActiveThreadId(null);
+    } else {
+      const defaultTid = getDefaultActiveThreadId();
+      if (defaultTid) setActiveThreadId(defaultTid);
+      else setActiveThreadId(null);
+    }
+
+    renderSidebar();
+
+    if (activeThreadId && hasAnyUserMessage(activeThreadId)) {
+      renderStoredThread(activeThreadId);
+    } else {
+      clearMessagesUI();
+      setHeroVisibility();
+      forceScrollMultiPass();
+    }
+
+    if (heroEl) heroEl.style.visibility = '';
+
+    syncSideDefaultState();
+  })();
+
+  /* =====================================================
+     EVENTS
+     ===================================================== */
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  formEl.addEventListener('submit', (e) => {
+    e.preventDefault();
+    sendMessage();
+  });
+
+})();
