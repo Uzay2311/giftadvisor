@@ -36,6 +36,12 @@
       inputEl.style.height = 'auto';
       inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
     });
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        formEl.requestSubmit();
+      }
+    });
   }
 
   function setHeroVisibility() {
@@ -48,6 +54,48 @@
       .replace(/\r\n/g, '\n')
       .replace(/\\n/g, '\n')
       .trim();
+  }
+
+  /** Format reply: **bold**, bullets, line breaks. Returns safe HTML. */
+  function formatReplyHtml(text) {
+    const t = String(text || '').trim();
+    if (!t) return '';
+    const escaped = t
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    const withBold = escaped
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    const lines = withBold.split(/\n/).map((l) => l.trim()).filter(Boolean);
+    const parts = [];
+    let inList = false;
+    for (const line of lines) {
+      const isBullet = /^[-•*]\s+/.test(line) || /^\d+\.\s+/.test(line);
+      const content = line.replace(/^[-•*]\s+|\d+\.\s+/, '');
+      if (isBullet) {
+        if (!inList) {
+          parts.push('<ul>');
+          inList = true;
+        }
+        parts.push('<li>' + content + '</li>');
+      } else {
+        if (inList) {
+          parts.push('</ul>');
+          inList = false;
+        }
+        parts.push('<p>' + line + '</p>');
+      }
+    }
+    if (inList) parts.push('</ul>');
+    return parts.join('');
+  }
+
+  function stripSearchQueriesFromReply(text) {
+    const t = String(text || '').trim();
+    const idx = t.search(/\*{0,2}\s*Search\s+Queries\s*\*{0,2}\s*:?\s*/i);
+    return idx >= 0 ? t.slice(0, idx).trim() : t;
   }
 
   function stripJsonReply(text) {
@@ -179,11 +227,13 @@
       .slice(-16);
 
     const lastAssistant = messages.filter((m) => m.role === 'assistant').pop();
+    const previousQueries = lastAssistant?.products_by_query?.map((p) => p.query).filter(Boolean) || [];
     const payload = {
       message: msg,
       history,
       occasion: selectedOccasion,
-      gift_context: lastAssistant && lastAssistant.gift_context ? lastAssistant.gift_context : undefined,
+      gift_context: lastAssistant?.gift_context || undefined,
+      previous_queries: previousQueries.length > 0 ? previousQueries : undefined,
       stream: true,
     };
 
@@ -270,37 +320,26 @@
     sendBtn.disabled = true;
 
     const { row: typingRow, bubble: typingBubble } = renderMessage('assistant', '', true);
-
-    let fullText = '';
-
-    let productsLoadingEl = null;
+    typingBubble.innerHTML = '<div class="ga-loading"><div class="ga-loading__spinner"></div><span class="ga-loading__text">Finding gifts for you</span><span class="ga-loading__dots"><span></span><span></span><span></span></span></div>';
 
     try {
       await callBackendStream(
         msg,
-        (delta) => {
-          fullText += delta;
-          typingBubble.innerHTML = '';
-          typingBubble.textContent = normalize(stripJsonReply(fullText));
-          typingBubble.style.whiteSpace = 'pre-wrap';
-          scrollToBottom();
-        },
+        () => {},
         (finalPayload) => {
-          const reply = finalPayload.reply || fullText;
+          const reply = finalPayload.reply || '';
           const productsByQuery = finalPayload.products_by_query || [];
-          const wrap = typingRow.querySelector('.ga-msg__wrap');
-          if (productsLoadingEl && productsLoadingEl.parentNode) {
-            productsLoadingEl.remove();
-          }
+          const replyStr = normalize(stripSearchQueriesFromReply(stripJsonReply(reply)));
+
+          typingBubble.innerHTML = '';
+
           if (productsByQuery.length > 0) {
             const resultsContainer = document.createElement('div');
             resultsContainer.className = 'ga-results';
-            const briefText = document.createElement('div');
-            briefText.className = 'ga-results__brief';
-            const replyStr = normalize(stripJsonReply(reply));
-            briefText.textContent = replyStr.length > 200 ? replyStr.slice(0, 200).trim() + '…' : replyStr;
-            briefText.style.whiteSpace = 'pre-wrap';
-            resultsContainer.appendChild(briefText);
+            const briefEl = document.createElement('div');
+            briefEl.className = 'ga-results__brief';
+            briefEl.innerHTML = formatReplyHtml(replyStr);
+            resultsContainer.appendChild(briefEl);
             productsByQuery.forEach(({ query, subtitle, products }) => {
               if (!products || !products.length) return;
               const section = document.createElement('div');
@@ -324,31 +363,23 @@
               section.appendChild(carousel);
               resultsContainer.appendChild(section);
             });
-            typingBubble.innerHTML = '';
             typingBubble.appendChild(resultsContainer);
           } else {
-            typingBubble.innerHTML = '';
-            typingBubble.textContent = normalize(stripJsonReply(reply));
-            typingBubble.style.whiteSpace = 'pre-wrap';
+            const textEl = document.createElement('div');
+            textEl.className = 'ga-reply';
+            textEl.innerHTML = formatReplyHtml(replyStr);
+            typingBubble.appendChild(textEl);
           }
-          typingRow.classList.remove('ga-msg--assistant');
-          typingRow.classList.add('ga-msg--assistant');
+
           messages.push({
             role: 'assistant',
             content: reply,
             products_by_query: productsByQuery,
             gift_context: finalPayload.gift_context,
           });
-        },
-        (loadingPayload) => {
-          const wrap = typingRow.querySelector('.ga-msg__wrap');
-          if (!wrap) return;
-          productsLoadingEl = document.createElement('div');
-          productsLoadingEl.className = 'ga-products-loading';
-          productsLoadingEl.innerHTML = '<div class="ga-products-loading__spinner"></div><span class="ga-products-loading__text">Finding products...</span>';
-          wrap.appendChild(productsLoadingEl);
           scrollToBottom();
-        }
+        },
+        () => {}
       );
     } catch (err) {
       typingBubble.innerHTML = '';
