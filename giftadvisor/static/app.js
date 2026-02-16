@@ -158,6 +158,8 @@
       imgEl.src = product.image;
       imgEl.alt = product.title || 'Product';
       imgEl.loading = 'lazy';
+      imgEl.addEventListener('load', () => scrollToBottom());
+      imgEl.addEventListener('error', () => scrollToBottom());
       img.appendChild(imgEl);
     } else {
       img.innerHTML = '<span class="ga-product__placeholder">No image</span>';
@@ -244,6 +246,12 @@
 
   function scrollToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function scheduleAutoScroll() {
+    scrollToBottom();
+    requestAnimationFrame(() => scrollToBottom());
+    setTimeout(() => scrollToBottom(), 120);
   }
 
   function getAccumulatedContext() {
@@ -362,7 +370,11 @@
 
     const { row: typingRow, bubble: typingBubble } = renderMessage('assistant', '', true);
     const renderLoadingState = (text) => {
-      const safeText = String(text || 'Working on your request');
+      const safeText = String(text || '').trim();
+      if (!safeText) {
+        typingBubble.innerHTML = '<div class="ga-loading"><div class="ga-loading__spinner"></div></div>';
+        return;
+      }
       typingBubble.innerHTML =
         '<div class="ga-loading">' +
         '<div class="ga-loading__spinner"></div>' +
@@ -370,7 +382,7 @@
         '<span class="ga-loading__dots"><span></span><span></span><span></span></span>' +
         '</div>';
     };
-    renderLoadingState('Understanding your preferences');
+    renderLoadingState('');
 
     try {
       await callBackendStream(
@@ -386,6 +398,10 @@
           if (productsByQuery.length > 0) {
             const resultsContainer = document.createElement('div');
             resultsContainer.className = 'ga-results';
+            const gotOptionsEl = document.createElement('div');
+            gotOptionsEl.className = 'ga-reply';
+            gotOptionsEl.textContent = 'Got some options';
+            resultsContainer.appendChild(gotOptionsEl);
             const briefEl = document.createElement('div');
             briefEl.className = 'ga-results__brief';
             briefEl.innerHTML = formatReplyHtml(replyStr);
@@ -421,16 +437,16 @@
             products_by_query: productsByQuery,
             gift_context: finalPayload.gift_context,
           });
-          scrollToBottom();
+          scheduleAutoScroll();
         },
         (loadingPayload) => {
           if (loadingPayload && loadingPayload.queries && loadingPayload.queries.length > 0) {
             const qCount = loadingPayload.queries.length;
             const msg = qCount > 1
-              ? 'Searching products and ranking the best options for you'
-              : 'Searching products and finalizing your best options';
+              ? 'Searching best options'
+              : 'Choosing the best options';
             renderLoadingState(msg);
-            scrollToBottom();
+            scheduleAutoScroll();
           }
         }
       );
@@ -445,6 +461,6 @@
     typingRow.classList.remove('ga-msg--assistant');
     typingRow.classList.add('ga-msg--assistant');
     sendBtn.disabled = false;
-    scrollToBottom();
+    scheduleAutoScroll();
   });
 })();

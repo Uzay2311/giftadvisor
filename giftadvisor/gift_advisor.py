@@ -127,14 +127,14 @@ PRODUCT_RANKER_PROMPT = """
 You are a product ranking assistant for gift recommendations.
 
 Task:
-- Select the best 3 products from candidate products for the given context.
+- Select the best top_k products from candidate products for the given context.
 - Prioritize: recipient fit, occasion fit, budget fit, interest/brand fit, product quality signals (rating/reviews).
 - Reject obvious mismatches (e.g., infant/kids products when recipient is an adult wife/woman) unless explicitly requested.
 - Do not invent products.
 - Return ONLY valid JSON:
 {
-  "selected_ids": ["p1", "p4", "p2"],
-  "reasons": ["short reason 1", "short reason 2", "short reason 3"]
+  "selected_ids": ["p1", "p4", "p2", "p7", "p3"],
+  "reasons": ["short reason 1", "short reason 2", "short reason 3", "short reason 4", "short reason 5"]
 }
 """.strip()
 
@@ -154,7 +154,7 @@ def _normalize_history(history, max_turns=16):
     return out[-max_turns:]
 
 
-def _flatten_product_candidates(raw_results: list, max_candidates: int = 15) -> list:
+def _flatten_product_candidates(raw_results: list, max_candidates: int = 1000) -> list:
     """Flatten and dedupe products from all query result buckets."""
     if not isinstance(raw_results, list):
         return []
@@ -195,7 +195,7 @@ def _rank_products_with_llm(
     history: list,
     gift_context: Optional[dict],
     query_subtitles: list,
-    top_k: int = 3,
+    top_k: int = 5,
 ) -> list:
     """Use a second LLM call to rank candidates and return top products."""
     if not isinstance(candidates, list) or not candidates:
@@ -658,16 +658,16 @@ def gift_advisor_chat():
                     queries,
                 )
                 raw_results = scrape_amazon_searches(queries, products_per_search=5)
-                candidates = _flatten_product_candidates(raw_results, max_candidates=15)
-                top3 = _rank_products_with_llm(
+                candidates = _flatten_product_candidates(raw_results, max_candidates=1000)
+                top5 = _rank_products_with_llm(
                     candidates=candidates,
                     message=message,
                     history=history,
                     gift_context=gift_context,
                     query_subtitles=query_subtitles,
-                    top_k=3,
+                    top_k=5,
                 )
-                products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top3}] if top3 else []
+                products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top5}] if top5 else []
             else:
                 logger.info(
                     "[GIFT_ADVISOR] no_product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | llm_search_queries=%s | resolved=[]",
@@ -778,16 +778,16 @@ def gift_advisor_chat():
                     )
                     yield _sse("products_loading", {"queries": queries})
                     raw_results = scrape_amazon_searches(queries, products_per_search=5)
-                    candidates = _flatten_product_candidates(raw_results, max_candidates=15)
-                    top3 = _rank_products_with_llm(
+                    candidates = _flatten_product_candidates(raw_results, max_candidates=1000)
+                    top5 = _rank_products_with_llm(
                         candidates=candidates,
                         message=message,
                         history=history,
                         gift_context=gift_context,
                         query_subtitles=query_subtitles,
-                        top_k=3,
+                        top_k=5,
                     )
-                    products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top3}] if top3 else []
+                    products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top5}] if top5 else []
                 else:
                     logger.info(
                         "[GIFT_ADVISOR] no_product_search (stream) | message=%r | previous_queries=%s | gift_context=%s | llm_search_queries=%s",
