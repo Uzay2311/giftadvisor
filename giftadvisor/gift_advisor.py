@@ -130,6 +130,7 @@ Task:
 - Select the best top_k products from candidate products for the given context.
 - Prioritize: recipient fit, occasion fit, budget fit, interest/brand fit, product quality signals (rating/reviews).
 - Reject obvious mismatches (e.g., infant/kids products when recipient is an adult wife/woman) unless explicitly requested.
+- Prefer category diversity when multiple query categories are present; avoid selecting all products from one category unless clearly superior.
 - Do not invent products.
 - Return ONLY valid JSON:
 {
@@ -239,7 +240,7 @@ def _rank_products_with_llm(
         selected_ids = []
 
     by_id = {c.get("id"): c for c in candidates if c.get("id")}
-    chosen = []
+    chosen_candidates = []
     used = set()
 
     for pid in selected_ids:
@@ -253,22 +254,44 @@ def _rank_products_with_llm(
             continue
         if key:
             used.add(key)
-        chosen.append(c.get("product") or {})
-        if len(chosen) >= top_k:
+        chosen_candidates.append(c)
+        if len(chosen_candidates) >= top_k:
             break
 
-    if len(chosen) < top_k:
+    if len(chosen_candidates) < top_k:
         for c in candidates:
             key = (c.get("title") or "").strip().lower()
             if key and key in used:
                 continue
             if key:
                 used.add(key)
-            chosen.append(c.get("product") or {})
-            if len(chosen) >= top_k:
+            chosen_candidates.append(c)
+            if len(chosen_candidates) >= top_k:
                 break
 
-    return chosen[:top_k]
+    # Light diversity guard: when pool has 2+ query categories,
+    # try to ensure top picks are not all from one query bucket.
+    pool_queries = {str(c.get("query") or "").strip() for c in candidates if str(c.get("query") or "").strip()}
+    picked_queries = {str(c.get("query") or "").strip() for c in chosen_candidates if str(c.get("query") or "").strip()}
+    if len(pool_queries) >= 2 and len(picked_queries) < 2 and len(chosen_candidates) >= 2:
+        used_titles = {(c.get("title") or "").strip().lower() for c in chosen_candidates if (c.get("title") or "").strip()}
+        missing_queries = [q for q in pool_queries if q not in picked_queries]
+        replacement = None
+        for mq in missing_queries:
+            for c in candidates:
+                if str(c.get("query") or "").strip() != mq:
+                    continue
+                t = (c.get("title") or "").strip().lower()
+                if t and t in used_titles:
+                    continue
+                replacement = c
+                break
+            if replacement:
+                break
+        if replacement:
+            chosen_candidates[-1] = replacement
+
+    return [(c.get("product") or {}) for c in chosen_candidates[:top_k]]
 
 
 def _safe_json_loads(s: str):
@@ -642,6 +665,10 @@ def gift_advisor_chat():
             resp = _call_llm(input_messages, stream=False)
             raw = (resp.choices[0].message.content or "").strip()
             parsed, _ = _parse_or_fix_json(raw)
+            effective_gift_context = merge_search_state(
+                gift_context,
+                parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
+            )
             products_by_query = []
             query_subtitles = _resolve_search_queries(parsed, raw, message, previous_queries, gift_context)
             if query_subtitles:
@@ -663,7 +690,7 @@ def gift_advisor_chat():
                     candidates=candidates,
                     message=message,
                     history=history,
-                    gift_context=gift_context,
+                    gift_context=effective_gift_context,
                     query_subtitles=query_subtitles,
                     top_k=5,
                 )
@@ -759,6 +786,10 @@ def gift_advisor_chat():
                             yield _sse("delta", {"text": out_delta})
 
                 parsed, _ = _parse_or_fix_json(raw_buf)
+                effective_gift_context = merge_search_state(
+                    gift_context,
+                    parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
+                )
                 products_by_query = []
                 query_subtitles = _resolve_search_queries(
                     parsed, raw_buf, message, previous_queries, gift_context
@@ -783,7 +814,7 @@ def gift_advisor_chat():
                         candidates=candidates,
                         message=message,
                         history=history,
-                        gift_context=gift_context,
+                        gift_context=effective_gift_context,
                         query_subtitles=query_subtitles,
                         top_k=5,
                     )
