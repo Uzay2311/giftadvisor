@@ -246,6 +246,15 @@
 
   function scrollToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    // Keep the page anchored to the latest row so the composer stays visible.
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' });
+    if (formEl) {
+      const rect = formEl.getBoundingClientRect();
+      const isOutOfView = rect.bottom > window.innerHeight || rect.top < 0;
+      if (isOutOfView) {
+        formEl.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
+      }
+    }
   }
 
   function scheduleAutoScroll() {

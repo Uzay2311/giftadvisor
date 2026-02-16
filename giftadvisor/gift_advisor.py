@@ -20,6 +20,10 @@ logger = logging.getLogger("gift_advisor")
 from product_search import scrape_amazon_searches
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+try:
+    PRODUCTS_PER_SEARCH = max(10, min(int(os.getenv("PRODUCTS_PER_SEARCH", "20")), 30))
+except Exception:
+    PRODUCTS_PER_SEARCH = 20
 
 # Prefer Responses API if available; fallback to Chat Completions
 def _call_llm(messages: list, stream: bool = False):
@@ -292,6 +296,64 @@ def _rank_products_with_llm(
             chosen_candidates[-1] = replacement
 
     return [(c.get("product") or {}) for c in chosen_candidates[:top_k]]
+
+
+def _friendly_section_title(subtitle: str, idx: int) -> str:
+    s = (subtitle or "").strip()
+    if s:
+        return s
+    defaults = [
+        "Top style picks",
+        "Best-fit gift ideas",
+        "Great options to consider",
+    ]
+    return defaults[(max(1, idx) - 1) % len(defaults)]
+
+
+def _rank_products_by_sections(
+    raw_results: list,
+    query_subtitles: list,
+    message: str,
+    history: list,
+    gift_context: Optional[dict],
+) -> list:
+    """Rank products per query bucket and return UI sections."""
+    if not isinstance(raw_results, list) or not raw_results:
+        return []
+
+    subtitle_by_query = {q: s for q, s in (query_subtitles or []) if q}
+    ordered_queries = [q for q, _ in (query_subtitles or []) if q][:3]
+    if not ordered_queries:
+        ordered_queries = [str(r.get("query") or "").strip() for r in raw_results[:3] if str(r.get("query") or "").strip()]
+
+    multi_query = len(ordered_queries) > 1
+    top_k = 3 if multi_query else 5
+    sections = []
+
+    for idx, q in enumerate(ordered_queries, start=1):
+        row = next((r for r in raw_results if str(r.get("query") or "").strip() == q), None)
+        if not isinstance(row, dict):
+            continue
+        candidates = _flatten_product_candidates([row], max_candidates=1000)
+        if not candidates:
+            continue
+        ranked = _rank_products_with_llm(
+            candidates=candidates,
+            message=message,
+            history=history,
+            gift_context=gift_context,
+            query_subtitles=[(q, subtitle_by_query.get(q, ""))],
+            top_k=top_k,
+        )
+        if not ranked:
+            continue
+        sections.append({
+            "query": f"category_{idx}",
+            "subtitle": _friendly_section_title(subtitle_by_query.get(q, ""), idx),
+            "products": ranked,
+        })
+
+    return sections
 
 
 def _safe_json_loads(s: str):
@@ -684,17 +746,14 @@ def gift_advisor_chat():
                     query_subtitles,
                     queries,
                 )
-                raw_results = scrape_amazon_searches(queries, products_per_search=5)
-                candidates = _flatten_product_candidates(raw_results, max_candidates=1000)
-                top5 = _rank_products_with_llm(
-                    candidates=candidates,
+                raw_results = scrape_amazon_searches(queries, products_per_search=PRODUCTS_PER_SEARCH)
+                products_by_query = _rank_products_by_sections(
+                    raw_results=raw_results,
+                    query_subtitles=query_subtitles,
                     message=message,
                     history=history,
                     gift_context=effective_gift_context,
-                    query_subtitles=query_subtitles,
-                    top_k=5,
                 )
-                products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top5}] if top5 else []
             else:
                 logger.info(
                     "[GIFT_ADVISOR] no_product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | llm_search_queries=%s | resolved=[]",
@@ -808,17 +867,14 @@ def gift_advisor_chat():
                         queries,
                     )
                     yield _sse("products_loading", {"queries": queries})
-                    raw_results = scrape_amazon_searches(queries, products_per_search=5)
-                    candidates = _flatten_product_candidates(raw_results, max_candidates=1000)
-                    top5 = _rank_products_with_llm(
-                        candidates=candidates,
+                    raw_results = scrape_amazon_searches(queries, products_per_search=PRODUCTS_PER_SEARCH)
+                    products_by_query = _rank_products_by_sections(
+                        raw_results=raw_results,
+                        query_subtitles=query_subtitles,
                         message=message,
                         history=history,
                         gift_context=effective_gift_context,
-                        query_subtitles=query_subtitles,
-                        top_k=5,
                     )
-                    products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top5}] if top5 else []
                 else:
                     logger.info(
                         "[GIFT_ADVISOR] no_product_search (stream) | message=%r | previous_queries=%s | gift_context=%s | llm_search_queries=%s",
