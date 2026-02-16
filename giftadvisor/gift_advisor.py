@@ -123,6 +123,21 @@ RULES (VERY IMPORTANT):
 10. When the user has provided enough (occasion, budget, interests/product), return search_strategy with queries. Do NOT return null when you have enough context.
 """.strip()
 
+PRODUCT_RANKER_PROMPT = """
+You are a product ranking assistant for gift recommendations.
+
+Task:
+- Select the best 3 products from candidate products for the given context.
+- Prioritize: recipient fit, occasion fit, budget fit, interest/brand fit, product quality signals (rating/reviews).
+- Reject obvious mismatches (e.g., infant/kids products when recipient is an adult wife/woman) unless explicitly requested.
+- Do not invent products.
+- Return ONLY valid JSON:
+{
+  "selected_ids": ["p1", "p4", "p2"],
+  "reasons": ["short reason 1", "short reason 2", "short reason 3"]
+}
+""".strip()
+
 
 
 
@@ -137,6 +152,123 @@ def _normalize_history(history, max_turns=16):
             continue
         out.append({"role": role, "content": content})
     return out[-max_turns:]
+
+
+def _flatten_product_candidates(raw_results: list, max_candidates: int = 15) -> list:
+    """Flatten and dedupe products from all query result buckets."""
+    if not isinstance(raw_results, list):
+        return []
+    out = []
+    seen = set()
+    idx = 1
+    for row in raw_results:
+        query = (row.get("query") or "").strip() if isinstance(row, dict) else ""
+        products = row.get("products") if isinstance(row, dict) else []
+        for p in products or []:
+            if not isinstance(p, dict):
+                continue
+            title = (p.get("title") or "").strip()
+            link = (p.get("link") or "").strip()
+            key = (title.lower() or link.lower()).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "id": f"p{idx}",
+                "query": query,
+                "title": title,
+                "description": (p.get("description") or "").strip(),
+                "price": (p.get("price") or "").strip(),
+                "rating": p.get("rating"),
+                "reviews": p.get("reviews"),
+                "product": p,
+            })
+            idx += 1
+            if len(out) >= max_candidates:
+                return out
+    return out
+
+
+def _rank_products_with_llm(
+    candidates: list,
+    message: str,
+    history: list,
+    gift_context: Optional[dict],
+    query_subtitles: list,
+    top_k: int = 3,
+) -> list:
+    """Use a second LLM call to rank candidates and return top products."""
+    if not isinstance(candidates, list) or not candidates:
+        return []
+
+    ranking_view = []
+    for c in candidates:
+        ranking_view.append({
+            "id": c.get("id"),
+            "query": c.get("query"),
+            "title": c.get("title"),
+            "description": c.get("description"),
+            "price": c.get("price"),
+            "rating": c.get("rating"),
+            "reviews": c.get("reviews"),
+        })
+
+    user_payload = {
+        "user_message": message,
+        "gift_context": gift_context or {},
+        "recent_history": history[-8:] if isinstance(history, list) else [],
+        "query_hints": [{"query": q, "subtitle": s} for q, s in (query_subtitles or [])[:3]],
+        "candidates": ranking_view,
+        "top_k": int(top_k),
+    }
+
+    rank_messages = [
+        {"role": "developer", "content": PRODUCT_RANKER_PROMPT},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+    ]
+
+    try:
+        resp = _call_llm(rank_messages, stream=False)
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = _extract_first_json_object(raw)
+        selected_ids = parsed.get("selected_ids") if isinstance(parsed, dict) else None
+        if not isinstance(selected_ids, list):
+            selected_ids = []
+    except Exception as e:
+        logger.warning("Product ranker LLM failed, using fallback top %s: %s", top_k, e)
+        selected_ids = []
+
+    by_id = {c.get("id"): c for c in candidates if c.get("id")}
+    chosen = []
+    used = set()
+
+    for pid in selected_ids:
+        if not isinstance(pid, str):
+            continue
+        c = by_id.get(pid)
+        if not c:
+            continue
+        key = (c.get("title") or "").strip().lower()
+        if key and key in used:
+            continue
+        if key:
+            used.add(key)
+        chosen.append(c.get("product") or {})
+        if len(chosen) >= top_k:
+            break
+
+    if len(chosen) < top_k:
+        for c in candidates:
+            key = (c.get("title") or "").strip().lower()
+            if key and key in used:
+                continue
+            if key:
+                used.add(key)
+            chosen.append(c.get("product") or {})
+            if len(chosen) >= top_k:
+                break
+
+    return chosen[:top_k]
 
 
 def _safe_json_loads(s: str):
@@ -319,6 +451,26 @@ def _strip_search_queries_from_reply(reply: str) -> str:
     return _compact_ui_text(t)
 
 
+def _reply_asks_for_info(reply: str) -> bool:
+    """True if the reply is asking a clarifying question—do not search in that case."""
+    if not reply or not isinstance(reply, str):
+        return False
+    r = reply.strip()
+    if r.endswith("?"):
+        return True
+    import re
+    asking = (
+        r"could you (please )?(tell|share)|what (is|are) (the )?(occasion|budget|recipient)",
+        r"do you have (a )?(budget|occasion)|tell me (about |the )?(occasion|budget|interests)",
+        r"please (share|tell|let me know)|(occasion|budget|interests) (for|of) (the )?gift",
+        r"is it (a )?(birthday|anniversary|wedding|holiday)",
+    )
+    for pat in asking:
+        if re.search(pat, r, re.I):
+            return True
+    return False
+
+
 def _validate_payload(obj: dict) -> tuple[bool, str]:
     if not isinstance(obj, dict):
         return (False, "not an object")
@@ -349,6 +501,9 @@ def _resolve_search_queries(
         sq_list = parsed.get("search_queries")
         if strategy is None and "search_strategy" in parsed:
             return []
+        reply_text = (parsed.get("reply") or "").strip()
+        if _reply_asks_for_info(reply_text):
+            return []
         if isinstance(strategy, dict):
             queries = strategy.get("queries") or []
             for q in queries[:3]:
@@ -371,11 +526,10 @@ def _resolve_search_queries(
             else:
                 return []
         else:
-            merged_ctx = merge_search_state(gift_context, parsed.get("gift_context") if isinstance(parsed.get("gift_context"), dict) else {})
-            has_occasion = bool((merged_ctx or {}).get("occasion"))
-            has_budget = (merged_ctx or {}).get("budget_min") is not None or (merged_ctx or {}).get("budget_max") is not None
-            if not has_occasion and not has_budget:
+            reply_text = (parsed.get("reply") or "").strip()
+            if _reply_asks_for_info(reply_text):
                 return []
+            merged_ctx = merge_search_state(gift_context, parsed.get("gift_context") if isinstance(parsed.get("gift_context"), dict) else {})
             queries = []
             if merged_ctx and merged_ctx.get("product"):
                 queries = _derive_queries_from_gift_context(merged_ctx, message)
@@ -389,12 +543,13 @@ def _resolve_search_queries(
                 queries = _derive_queries_from_gift_context(merged_ctx, message)
             query_subtitles = [(q, "") for q in queries if q]
     else:
-        merged_ctx = gift_context
-        has_occasion = bool((merged_ctx or {}).get("occasion"))
-        has_budget = (merged_ctx or {}).get("budget_min") is not None or (merged_ctx or {}).get("budget_max") is not None
-        if not has_occasion and not has_budget:
-            return []
         reply_text = (raw_text or "").strip()
+        parsed_reply = _extract_first_json_object(reply_text)
+        if isinstance(parsed_reply, dict) and parsed_reply.get("reply"):
+            reply_text = (parsed_reply.get("reply") or "").strip()
+        if _reply_asks_for_info(reply_text):
+            return []
+        merged_ctx = gift_context
         queries = []
         if merged_ctx and merged_ctx.get("product"):
             queries = _derive_queries_from_gift_context(merged_ctx, message)
@@ -503,11 +658,16 @@ def gift_advisor_chat():
                     queries,
                 )
                 raw_results = scrape_amazon_searches(queries, products_per_search=5)
-                sub_by_query = {q: s for q, s in query_subtitles}
-                products_by_query = [
-                    {"query": r["query"], "subtitle": sub_by_query.get(r["query"], ""), "products": r["products"]}
-                    for r in raw_results
-                ]
+                candidates = _flatten_product_candidates(raw_results, max_candidates=15)
+                top3 = _rank_products_with_llm(
+                    candidates=candidates,
+                    message=message,
+                    history=history,
+                    gift_context=gift_context,
+                    query_subtitles=query_subtitles,
+                    top_k=3,
+                )
+                products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top3}] if top3 else []
             else:
                 logger.info(
                     "[GIFT_ADVISOR] no_product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | llm_search_queries=%s | resolved=[]",
@@ -618,11 +778,16 @@ def gift_advisor_chat():
                     )
                     yield _sse("products_loading", {"queries": queries})
                     raw_results = scrape_amazon_searches(queries, products_per_search=5)
-                    sub_by_query = {q: s for q, s in query_subtitles}
-                    products_by_query = [
-                        {"query": r["query"], "subtitle": sub_by_query.get(r["query"], ""), "products": r["products"]}
-                        for r in raw_results
-                    ]
+                    candidates = _flatten_product_candidates(raw_results, max_candidates=15)
+                    top3 = _rank_products_with_llm(
+                        candidates=candidates,
+                        message=message,
+                        history=history,
+                        gift_context=gift_context,
+                        query_subtitles=query_subtitles,
+                        top_k=3,
+                    )
+                    products_by_query = [{"query": "Top picks", "subtitle": "Top picks for you", "products": top3}] if top3 else []
                 else:
                     logger.info(
                         "[GIFT_ADVISOR] no_product_search (stream) | message=%r | previous_queries=%s | gift_context=%s | llm_search_queries=%s",

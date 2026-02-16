@@ -361,7 +361,16 @@
     sendBtn.disabled = true;
 
     const { row: typingRow, bubble: typingBubble } = renderMessage('assistant', '', true);
-    typingBubble.innerHTML = '<div class="ga-loading"><div class="ga-loading__spinner"></div></div>';
+    const renderLoadingState = (text) => {
+      const safeText = String(text || 'Working on your request');
+      typingBubble.innerHTML =
+        '<div class="ga-loading">' +
+        '<div class="ga-loading__spinner"></div>' +
+        '<span class="ga-loading__text">' + safeText + '</span>' +
+        '<span class="ga-loading__dots"><span></span><span></span><span></span></span>' +
+        '</div>';
+    };
+    renderLoadingState('Understanding your preferences');
 
     try {
       await callBackendStream(
@@ -416,7 +425,11 @@
         },
         (loadingPayload) => {
           if (loadingPayload && loadingPayload.queries && loadingPayload.queries.length > 0) {
-            typingBubble.innerHTML = '<div class="ga-loading"><div class="ga-loading__spinner"></div><span class="ga-loading__text">Finding gifts for you</span><span class="ga-loading__dots"><span></span><span></span><span></span></span></div>';
+            const qCount = loadingPayload.queries.length;
+            const msg = qCount > 1
+              ? 'Searching products and ranking the best options for you'
+              : 'Searching products and finalizing your best options';
+            renderLoadingState(msg);
             scrollToBottom();
           }
         }
