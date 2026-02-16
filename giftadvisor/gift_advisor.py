@@ -298,10 +298,21 @@ def _rank_products_with_llm(
     return [(c.get("product") or {}) for c in chosen_candidates[:top_k]]
 
 
-def _friendly_section_title(subtitle: str, idx: int) -> str:
+def _friendly_section_title(query: str, subtitle: str, idx: int) -> str:
     s = (subtitle or "").strip()
     if s:
         return s
+    q = (query or "").strip()
+    if q:
+        import re
+        # Strip budget fragments and noisy symbols, then title-case a concise phrase.
+        q = re.sub(r"\b(?:under|below|over|above)\s*\$?\s*\d+(?:[.,]\d+)?\b", "", q, flags=re.I)
+        q = re.sub(r"\bbetween\s*\$?\s*\d+(?:[.,]\d+)?\s*(?:-|to|and)\s*\$?\s*\d+(?:[.,]\d+)?\b", "", q, flags=re.I)
+        q = re.sub(r"[^\w\s'-]", " ", q)
+        q = re.sub(r"\s{2,}", " ", q).strip()
+        if q:
+            words = q.split()[:6]
+            return " ".join(words).title()
     defaults = [
         "Top style picks",
         "Best-fit gift ideas",
@@ -349,7 +360,7 @@ def _rank_products_by_sections(
             continue
         sections.append({
             "query": f"category_{idx}",
-            "subtitle": _friendly_section_title(subtitle_by_query.get(q, ""), idx),
+            "subtitle": _friendly_section_title(q, subtitle_by_query.get(q, ""), idx),
             "products": ranked,
         })
 
@@ -556,6 +567,48 @@ def _reply_asks_for_info(reply: str) -> bool:
     return False
 
 
+def _enforce_budget_on_query(query: str, gift_context: Optional[dict]) -> str:
+    """Normalize budget phrase in a query from gift_context constraints."""
+    if not isinstance(query, str):
+        return query
+    q = query.strip()
+    if not q or not isinstance(gift_context, dict):
+        return q
+    bmin = gift_context.get("budget_min")
+    bmax = gift_context.get("budget_max")
+    try:
+        has_min = isinstance(bmin, (int, float)) and float(bmin) > 0
+        has_max = isinstance(bmax, (int, float)) and float(bmax) > 0
+    except Exception:
+        has_min = False
+        has_max = False
+    if not has_min and not has_max:
+        return q
+
+    import re
+    # Strip existing budget phrases to avoid conflicts like "under $500 between $300 and $500"
+    q = re.sub(r"\b(?:under|below|over|above)\s*\$?\s*\d+(?:[.,]\d+)?\b", "", q, flags=re.I)
+    q = re.sub(r"\bbetween\s*\$?\s*\d+(?:[.,]\d+)?\s*(?:-|to|and)\s*\$?\s*\d+(?:[.,]\d+)?\b", "", q, flags=re.I)
+    q = re.sub(r"\s{2,}", " ", q).strip()
+
+    if has_min and has_max:
+        budget_phrase = f"between ${int(float(bmin))} and ${int(float(bmax))}"
+    elif has_max:
+        budget_phrase = f"under ${int(float(bmax))}"
+    else:
+        budget_phrase = f"over ${int(float(bmin))}"
+    return f"{q} {budget_phrase}".strip()
+
+
+def _apply_budget_to_query_subtitles(query_subtitles: list, gift_context: Optional[dict]) -> list:
+    if not isinstance(query_subtitles, list) or not query_subtitles:
+        return query_subtitles
+    out = []
+    for q, s in query_subtitles:
+        out.append((_enforce_budget_on_query(str(q or "").strip(), gift_context), s))
+    return out
+
+
 def _validate_payload(obj: dict) -> tuple[bool, str]:
     if not isinstance(obj, dict):
         return (False, "not an object")
@@ -584,6 +637,10 @@ def _resolve_search_queries(
     if isinstance(parsed, dict):
         strategy = parsed.get("search_strategy")
         sq_list = parsed.get("search_queries")
+        effective_ctx = merge_search_state(
+            gift_context,
+            parsed.get("gift_context") if isinstance(parsed.get("gift_context"), dict) else {}
+        )
         if strategy is None and "search_strategy" in parsed:
             return []
         reply_text = (parsed.get("reply") or "").strip()
@@ -600,7 +657,7 @@ def _resolve_search_queries(
                     sub = ""
                 if query:
                     query_subtitles.append((query, sub))
-            return query_subtitles
+            return _apply_budget_to_query_subtitles(query_subtitles, effective_ctx)
         if "search_queries" in parsed:
             if isinstance(sq_list, list) and sq_list:
                 query_subtitles = _parse_search_queries(sq_list)
@@ -627,6 +684,7 @@ def _resolve_search_queries(
             if not queries and merged_ctx:
                 queries = _derive_queries_from_gift_context(merged_ctx, message)
             query_subtitles = [(q, "") for q in queries if q]
+        query_subtitles = _apply_budget_to_query_subtitles(query_subtitles, effective_ctx)
     else:
         reply_text = (raw_text or "").strip()
         parsed_reply = _extract_first_json_object(reply_text)
@@ -647,6 +705,7 @@ def _resolve_search_queries(
         if not queries and merged_ctx:
             queries = _derive_queries_from_gift_context(merged_ctx, message)
         query_subtitles = [(q, "") for q in queries if q]
+        query_subtitles = _apply_budget_to_query_subtitles(query_subtitles, merged_ctx)
     return query_subtitles
 
 

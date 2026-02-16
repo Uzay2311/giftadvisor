@@ -250,8 +250,8 @@ def scrape_amazon_searches(queries: List[str], products_per_search: int = 3) -> 
     # Prefer SerpAPI Amazon
     if os.getenv("SERPAPI_API_KEY"):
         out = []
-        seen = set()
         for q in clean_queries:
+            seen = set()
             items = _serpapi_amazon_search(q, max_results=products_per_search)
             filtered = [i for i in items if (i.get("title") or "").strip().lower() not in seen]
             for i in filtered:
@@ -264,8 +264,8 @@ def scrape_amazon_searches(queries: List[str], products_per_search: int = 3) -> 
     # Fallback: Serper Shopping
     if os.getenv("SERPER_API_KEY"):
         out = []
-        seen = set()
         for q in clean_queries:
+            seen = set()
             items = _serper_search(q, max_results=products_per_search, amazon_only=True)
             filtered = [i for i in items if (i.get("title") or "").strip().lower() not in seen]
             for i in filtered:
@@ -278,8 +278,8 @@ def scrape_amazon_searches(queries: List[str], products_per_search: int = 3) -> 
     # Fallback: Scrape Amazon via ScraperAPI
     if os.getenv("SCRAPER_API_KEY"):
         out = []
-        seen = set()
         for q in clean_queries:
+            seen = set()
             url = build_amazon_search_url(q)
             if not url:
                 continue
