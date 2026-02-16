@@ -226,14 +226,8 @@
         header.className = 'ga-carousel-section__header';
         const title = document.createElement('h3');
         title.className = 'ga-carousel-section__title';
-        title.textContent = formatQueryTitle(query);
+        title.textContent = (subtitle && subtitle.trim()) ? subtitle.trim() : formatQueryTitle(query);
         header.appendChild(title);
-        if (subtitle) {
-          const sub = document.createElement('p');
-          sub.className = 'ga-carousel-section__subtitle';
-          sub.textContent = subtitle;
-          header.appendChild(sub);
-        }
         section.appendChild(header);
         const carousel = document.createElement('div');
         carousel.className = 'ga-carousel';
@@ -252,20 +246,35 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  function getAccumulatedContext() {
+    const assistants = messages.filter((m) => m.role === 'assistant');
+    let giftContext = {};
+    let previousQueries = [];
+    for (const a of assistants) {
+      if (a.gift_context && typeof a.gift_context === 'object') {
+        giftContext = { ...giftContext, ...a.gift_context };
+      }
+      if (a.products_by_query && Array.isArray(a.products_by_query)) {
+        const qs = a.products_by_query.map((p) => p.query).filter(Boolean);
+        if (qs.length > 0) previousQueries = qs;
+      }
+    }
+    return { gift_context: giftContext, previous_queries: previousQueries };
+  }
+
   async function callBackendStream(msg, onDelta, onFinal, onProductsLoading) {
     const history = messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .map((m) => ({ role: m.role, content: m.content }))
       .slice(-16);
 
-    const lastAssistant = messages.filter((m) => m.role === 'assistant').pop();
-    const previousQueries = lastAssistant?.products_by_query?.map((p) => p.query).filter(Boolean) || [];
+    const { gift_context, previous_queries } = getAccumulatedContext();
     const payload = {
       message: msg,
       history,
       occasion: selectedOccasion,
-      gift_context: lastAssistant?.gift_context || undefined,
-      previous_queries: previousQueries.length > 0 ? previousQueries : undefined,
+      gift_context: Object.keys(gift_context).length > 0 ? gift_context : undefined,
+      previous_queries: previous_queries.length > 0 ? previous_queries : undefined,
       stream: true,
     };
 
@@ -380,14 +389,8 @@
               header.className = 'ga-carousel-section__header';
               const title = document.createElement('h3');
               title.className = 'ga-carousel-section__title';
-              title.textContent = formatQueryTitle(query);
+              title.textContent = (subtitle && subtitle.trim()) ? subtitle.trim() : formatQueryTitle(query);
               header.appendChild(title);
-              if (subtitle) {
-                const sub = document.createElement('p');
-                sub.className = 'ga-carousel-section__subtitle';
-                sub.textContent = subtitle;
-                header.appendChild(sub);
-              }
               section.appendChild(header);
               const carousel = document.createElement('div');
               carousel.className = 'ga-carousel';

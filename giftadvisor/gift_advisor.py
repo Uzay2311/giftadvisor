@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from typing import Optional
 import os
 import json
+import logging
+
+logger = logging.getLogger("gift_advisor")
 
 from product_search import scrape_amazon_searches
 
@@ -38,6 +41,20 @@ def _call_llm(messages: list, stream: bool = False):
         stream=stream,
     )
 
+def merge_search_state(old: Optional[dict], new: dict) -> dict:
+    """Merge new constraints into existing search state."""
+    merged = old.copy() if isinstance(old, dict) else {}
+
+    for k, v in new.items():
+        if v is None:
+            continue
+        if isinstance(v, list) and not v:
+            continue
+        merged[k] = v
+
+    return merged
+
+
 GIFT_ADVISOR_SYSTEM_PROMPT = """
 You are a warm, knowledgeable Gift Advisor. Your goal is to help people find the perfect gift for a specific occasion.
 
@@ -59,36 +76,49 @@ Formatting:
 """.strip()
 
 GIFT_ADVISOR_ENRICHMENT = """
-Return structured JSON only:
+Return structured JSON only. The "reply" field must contain your actual conversational response to the user—never a placeholder or schema description.
+
 {
-  "reply": "string (your response to the user, UI-ready, use \\n not \\n\\n)",
+  "reply": "Your actual reply text here",
   "gift_context": {
+    "product": "string | null",
+    "color": "string | null",
+    "gender": "men | women | unisex | null",
+    "recipient": "string | null",
+    "budget_min": number | null,
+    "budget_max": number | null,
     "occasion": "string | null",
-    "recipient_info": "string | null",
-    "budget": "string | null",
-    "interests": ["string"],
-    "suggestions_so_far": ["string"]
-  } | null,
-  "search_queries": [{"query": "string", "subtitle": "string"} | "string"] | null
+    "interests": ["string"]
+  },
+  "search_strategy": {
+    "mode": "specific | explore",
+    "queries": [
+      {
+        "query": "string",
+        "subtitle": "string"
+      }
+    ]
+  } | null
 }
 
-Rules:
-- gift_context: update as the conversation progresses. ALWAYS set recipient_info (e.g. "wife", "mom") and budget when user mentions them—critical for follow-ups.
-- search_queries: YOU decide when to submit a product search. Return search_queries ONLY when a product search is needed; return null otherwise. The backend will NOT search when you return null.
-  - SUBMIT when: (1) user asks for gift ideas with enough context (product type, recipient, etc.), (2) user suggests a product type to search, (3) user revises a previous request (e.g. "200+", "red"), (4) user asks for something new/different.
-  - DO NOT SUBMIT when: (1) not enough info to search (greetings, "ola", "test", typos, unclear), (2) you're asking a clarifying question, (3) user asks about the products already shown (when previous_products_shown=true, e.g. "which one?", "tell me more about the first")—answer from your suggestions/gift_context, (4) message doesn't warrant a product search.
-- REVISION vs NEW: You receive previous_search_queries and gift_context. YOU must rewrite, revise, or build the full query—there is no backend logic to inject price/gender.
-  - REVISION: User adds constraints (e.g. "200+", "under $50", "red"). REWRITE previous_search_queries into new search_queries that combine the product type + new constraint. "200+" → "over 200"; "under $50" → "under 50". Example: previous=["running shoes women"], user says "200+" → search_queries: [{"query": "running shoes women over 200", "subtitle": "..."}].
-  - NEW: User asks for something different. Generate fresh search_queries for the new topic. Ignore previous_search_queries.
-- CRITICAL: ALWAYS embed price, gender, color directly in each search_queries query string. The query is sent to Amazon search as-is—there is no backend injection.
-  - Price MINIMUM (user wants expensive): "200+", "$200+", "over 200" → include "over 200" or "from 200" in query (e.g. "luxury watch over 200").
-  - Price MAXIMUM (user wants cheap): "under $50", "budget 100", "max 50" → include "under 50", "under 100" in query (e.g. "running shoes women under 50").
-  - Gender: wife/mom/daughter → "women"; husband/dad/son → "men". Include in every query when known (e.g. "women running shoes").
-  - Color: include in query when user says "red", "blue", etc.
-- Example queries: "luxury watch over 200", "red running shoes women under 50", "pickleball shoes women".
-- subtitle: brief 3-8 word description for the carousel.
-- NEVER include search strings in your reply. The reply is user-facing only.
-- If unsure about a field, omit or null
+RULES (VERY IMPORTANT):
+
+0. "reply" must be your real response (e.g. "I'd love to help! What gift are you looking for?"). NEVER output schema text like "string (UI-ready...)" or placeholders.
+1. You MUST build on the FULL conversation history.
+2. NEVER drop hard constraints once stated:
+   - product
+   - color
+   - gender (wife → women, husband → men)
+   - budget
+3. When the user revises (adds info), UPDATE the existing constraints.
+4. search_strategy.mode:
+   - "specific" → 1 query (clear product + constraints)
+   - "explore" → 3 queries (same hard constraints, different angles)
+5. Queries MUST be Amazon-style search strings. When budget is set (budget_min/budget_max), append it to each query—e.g. "women's pickleball shoes under $50", "red running shoes between $30 and $80", "gift for wife below $100".
+6. reply MUST NEVER include search queries.
+7. If insufficient info to search (e.g. asking "What is your budget?", "Who is the recipient?"), return search_strategy = null. NEVER search when you are asking a clarifying question—return null.
+8. When asking for more details (occasion, recipient, budget), ALWAYS set search_strategy = null. Do not extract your question text as a search query.
+9. When the user ADDS details (e.g. "for my wife", "she will use for pickleball"), UPDATE gift_context (recipient, gender, interests) and return search_strategy with Amazon-style queries that combine all constraints—e.g. "women's pickleball shoes", "red pickleball shoes women". Do NOT return null when you have product + recipient/use-case.
 """.strip()
 
 
@@ -161,35 +191,85 @@ def _extract_search_queries_from_reply(reply: str) -> list:
     """Fallback: extract product-type phrases from reply when LLM omits search_queries."""
     import re
     queries = []
-    # Match **Bold** or - **Bold**: patterns
+    skip = ("e.g", "etc", "i.e", "what is", "who is", "could you", "please provide", "budget range", "your budget")
+    def _should_skip(p):
+        lower = p.lower()
+        return any(s in lower for s in skip) or lower.endswith("?")
     for m in re.finditer(r'\*{2}([^*]+)\*{2}', reply or ""):
         phrase = m.group(1).strip()
-        if len(phrase) > 2 and len(phrase) < 50 and phrase.lower() not in ("e.g", "etc", "i.e"):
+        if len(phrase) > 2 and len(phrase) < 50 and not _should_skip(phrase):
             queries.append(phrase)
-    # Also match "- Item:" or "• Item" at line start
     for m in re.finditer(r'^[\s]*[-•*]\s+\*{0,2}([^:*\n]+)', reply or "", re.MULTILINE):
         phrase = m.group(1).strip().strip("*")
-        if len(phrase) > 2 and len(phrase) < 50:
+        if len(phrase) > 2 and len(phrase) < 50 and not _should_skip(phrase):
             clean = phrase.split(":")[0].strip()
             if clean and clean.lower() not in [q.lower() for q in queries]:
                 queries.append(clean)
     return list(dict.fromkeys(queries))[:3]  # dedupe, max 3
 
 
-def _derive_queries_from_gift_context(gift_context: Optional[dict]) -> list:
-    """Derive search queries from gift_context when LLM omits them."""
+def _derive_queries_from_gift_context(
+    gift_context: Optional[dict],
+    message: Optional[str] = None,
+) -> list:
+    """Derive search queries from gift_context (and message) when LLM omits them.
+    Builds Amazon-style queries from product, color, gender, interests.
+    """
     if not isinstance(gift_context, dict):
         return []
+    product = (gift_context.get("product") or "").strip()
+    color = (gift_context.get("color") or "").strip()
+    gender = (gift_context.get("gender") or "").strip().lower()
+    interests = [s for s in (gift_context.get("interests") or []) if isinstance(s, str) and len(s) > 1]
     queries = []
-    for s in (gift_context.get("suggestions_so_far") or [])[:3]:
-        if isinstance(s, str) and len(s) > 2:
-            clean = s.strip().strip("*").split(":")[0].strip()
-            if clean and clean.lower() not in [q.lower() for q in queries]:
-                queries.append(clean)
-    for i in (gift_context.get("interests") or [])[:2]:
-        if isinstance(i, str) and len(i) > 2:
+    # Infer gender from message if not in context
+    if not gender and message:
+        import re
+        if re.search(r"\bwife\b", message, re.I):
+            gender = "women"
+        elif re.search(r"\bhusband\b", message, re.I):
+            gender = "men"
+    # Infer interests from message if not in context (e.g. "for pickleball", "for tennis")
+    if not interests and message:
+        import re
+        for m in re.finditer(r"(?:for|use\s+(?:this|it)\s+for|into)\s+(\w+)", message, re.I):
+            word = m.group(1).lower()
+            if len(word) > 3 and word not in ("this", "that", "gift", "occasion"):
+                interests = [word]
+                break
+    # Infer product from interest if user says "for pickleball" etc. (e.g. shoes + pickleball -> pickleball shoes)
+    base_product = product
+    if not base_product and interests:
+        base_product = interests[0] + " gift"
+    if interests and product and "shoes" in product.lower():
+        for i in interests:
+            if i.lower() in ("pickleball", "tennis", "basketball", "volleyball", "golf", "running"):
+                base_product = f"{i} shoes"
+                break
+    if not base_product:
+        for s in (gift_context.get("suggestions_so_far") or [])[:3]:
+            if isinstance(s, str) and len(s) > 2:
+                clean = s.strip().strip("*").split(":")[0].strip()
+                if clean and clean.lower() not in [q.lower() for q in queries]:
+                    queries.append(clean)
+        for i in interests[:2]:
             if i.lower() not in [q.lower() for q in queries]:
                 queries.append(i + " gift")
+        return queries[:3]
+    # Build product-based queries
+    gender_prefix = "women's " if gender == "women" else "men's " if gender == "men" else ""
+    color_prefix = (color + " ") if color else ""
+    q1 = f"{gender_prefix}{color_prefix}{base_product}".strip()
+    if q1 and q1.lower() not in [x.lower() for x in queries]:
+        queries.append(q1)
+    if len(queries) < 3 and color and color.lower() not in q1.lower():
+        q2 = f"{color} {base_product} {gender}".strip() if gender else f"{color} {base_product}".strip()
+        if q2 and q2.lower() not in [x.lower() for x in queries]:
+            queries.append(q2)
+    if len(queries) < 3 and gender and gender not in q1.lower():
+        q3 = f"{base_product} {gender}".strip()
+        if q3 and q3.lower() not in [x.lower() for x in queries]:
+            queries.append(q3)
     return queries[:3]
 
 
@@ -202,7 +282,13 @@ def _user_message_to_search_queries(message: str) -> list:
     vague = re.match(r"^(show\s+(me\s+)?more|other\s+options?|more\s+ideas?|anything\s+else)\s*[?!.]?$", msg, re.I)
     if vague:
         return []
-    stop = {"for", "my", "the", "a", "an", "to", "and", "or", "with", "around", "about", "budget", "under", "over"}
+    # "gift for my wife" / "gift for husband" → clean Amazon-style queries
+    m = re.search(r"gift\s+(?:for\s+)?(?:my\s+)?(wife|husband|mom|mother|dad|father|girlfriend|boyfriend|friend)", msg, re.I)
+    if m:
+        who = m.group(1).lower()
+        q = "gift for wife" if who == "wife" else "gift for husband" if who == "husband" else f"gift for {who}"
+        return [q]
+    stop = {"for", "my", "the", "a", "an", "to", "and", "or", "with", "around", "about", "budget", "under", "over", "no", "special", "occasion", "just", "because"}
     words = re.sub(r"[^\w\s]", " ", msg).split()
     kept = [w for w in words if w.lower() not in stop and not w.isdigit()]
     if len(kept) < 2:
@@ -254,10 +340,25 @@ def _resolve_search_queries(
     previous_queries: Optional[list],
     gift_context: Optional[dict],
 ) -> list:
-    """Resolve search queries. Trust LLM when it returns search_queries; use minimal fallbacks when omitted. No backend injection."""
+    """Resolve search queries. Trust LLM when it returns null—no search. Only use fallbacks when field is omitted."""
     query_subtitles = []
     if isinstance(parsed, dict):
+        strategy = parsed.get("search_strategy")
         sq_list = parsed.get("search_queries")
+        if strategy is None and "search_strategy" in parsed:
+            return []
+        if isinstance(strategy, dict):
+            queries = strategy.get("queries") or []
+            for q in queries[:3]:
+                if isinstance(q, dict):
+                    query = (q.get("query") or "").strip()
+                    sub = (q.get("subtitle") or "").strip()
+                else:
+                    query = str(q or "").strip()
+                    sub = ""
+                if query:
+                    query_subtitles.append((query, sub))
+            return query_subtitles
         if "search_queries" in parsed:
             if isinstance(sq_list, list) and sq_list:
                 query_subtitles = _parse_search_queries(sq_list)
@@ -268,25 +369,36 @@ def _resolve_search_queries(
             else:
                 return []
         else:
-            queries = _extract_search_queries_from_reply((parsed.get("reply") or "").strip() or raw_text.strip())
+            merged_ctx = merge_search_state(gift_context, parsed.get("gift_context") if isinstance(parsed.get("gift_context"), dict) else {})
+            queries = []
+            if merged_ctx and merged_ctx.get("product"):
+                queries = _derive_queries_from_gift_context(merged_ctx, message)
+            if not queries:
+                queries = _extract_search_queries_from_reply((parsed.get("reply") or "").strip() or (raw_text or "").strip())
             if not queries:
                 queries = _user_message_to_search_queries(message)
             if not queries and isinstance(previous_queries, list) and previous_queries:
                 queries = [str(q).strip() for q in previous_queries[:3] if str(q).strip()]
-            if not queries and gift_context:
-                queries = _derive_queries_from_gift_context(gift_context)
+            if not queries and merged_ctx:
+                queries = _derive_queries_from_gift_context(merged_ctx, message)
             query_subtitles = [(q, "") for q in queries if q]
     else:
-        reply_text = raw_text.strip() if raw_text else ""
-        queries = _extract_search_queries_from_reply(reply_text)
+        merged_ctx = gift_context
+        reply_text = (raw_text or "").strip()
+        queries = []
+        if merged_ctx and merged_ctx.get("product"):
+            queries = _derive_queries_from_gift_context(merged_ctx, message)
+        if not queries:
+            queries = _extract_search_queries_from_reply(reply_text)
         if not queries:
             queries = _user_message_to_search_queries(message)
         if not queries and isinstance(previous_queries, list) and previous_queries:
             queries = [str(q).strip() for q in previous_queries[:3] if str(q).strip()]
-        if not queries and gift_context:
-            queries = _derive_queries_from_gift_context(gift_context)
+        if not queries and merged_ctx:
+            queries = _derive_queries_from_gift_context(merged_ctx, message)
         query_subtitles = [(q, "") for q in queries if q]
     return query_subtitles
+
 
 
 def gift_advisor_chat():
@@ -319,6 +431,8 @@ def gift_advisor_chat():
         if isinstance(previous_queries, list) and previous_queries:
             context_bits.append(f"previous_search_queries={json.dumps(previous_queries)}")
             context_bits.append("previous_products_shown=true")
+        elif history:
+            context_bits.append("(no previous_search_queries—derive product, recipient, budget from conversation history below)")
 
         context_msg = "GIFT_CONTEXT: " + (", ".join(context_bits) if context_bits else "none")
 
@@ -367,12 +481,32 @@ def gift_advisor_chat():
             query_subtitles = _resolve_search_queries(parsed, raw, message, previous_queries, gift_context)
             if query_subtitles:
                 queries = [q for q, _ in query_subtitles]
+                logger.info(
+                    "[GIFT_ADVISOR] product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | context=%s | llm_search_queries=%s | resolved=%s | queries_submitted=%s",
+                    message,
+                    json.dumps(history[-6:] if history else [], ensure_ascii=False),
+                    previous_queries,
+                    gift_context,
+                    context_msg[:200] + "..." if len(context_msg) > 200 else context_msg,
+                    parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                    query_subtitles,
+                    queries,
+                )
                 raw_results = scrape_amazon_searches(queries, products_per_search=5)
                 sub_by_query = {q: s for q, s in query_subtitles}
                 products_by_query = [
                     {"query": r["query"], "subtitle": sub_by_query.get(r["query"], ""), "products": r["products"]}
                     for r in raw_results
                 ]
+            else:
+                logger.info(
+                    "[GIFT_ADVISOR] no_product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | llm_search_queries=%s | resolved=[]",
+                    message,
+                    json.dumps(history[-6:] if history else [], ensure_ascii=False),
+                    previous_queries,
+                    gift_context,
+                    parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                )
             payload = _finalize_payload(parsed, raw, products_by_query=products_by_query if products_by_query else None)
             return jsonify(payload)
 
@@ -461,6 +595,17 @@ def gift_advisor_chat():
                 )
                 if query_subtitles:
                     queries = [q for q, _ in query_subtitles]
+                    logger.info(
+                        "[GIFT_ADVISOR] product_search (stream) | message=%r | history=%s | previous_queries=%s | gift_context=%s | context=%s | llm_search_queries=%s | resolved=%s | queries_submitted=%s",
+                        message,
+                        json.dumps(history[-6:] if history else [], ensure_ascii=False),
+                        previous_queries,
+                        gift_context,
+                        context_msg[:200] + "..." if len(context_msg) > 200 else context_msg,
+                        parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                        query_subtitles,
+                        queries,
+                    )
                     yield _sse("products_loading", {"queries": queries})
                     raw_results = scrape_amazon_searches(queries, products_per_search=5)
                     sub_by_query = {q: s for q, s in query_subtitles}
@@ -468,6 +613,14 @@ def gift_advisor_chat():
                         {"query": r["query"], "subtitle": sub_by_query.get(r["query"], ""), "products": r["products"]}
                         for r in raw_results
                     ]
+                else:
+                    logger.info(
+                        "[GIFT_ADVISOR] no_product_search (stream) | message=%r | previous_queries=%s | gift_context=%s | llm_search_queries=%s",
+                        message,
+                        previous_queries,
+                        gift_context,
+                        parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                    )
                 payload = _finalize_payload(parsed, raw_buf, products_by_query=products_by_query if products_by_query else None)
                 yield _sse("final", payload)
                 yield _sse("done", {"ok": True})
