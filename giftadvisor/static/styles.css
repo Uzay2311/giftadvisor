@@ -82,7 +82,7 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  min-height: 70vh;
+  min-height: 62vh;
 }
 
 .ga-chat__shell {
@@ -578,4 +578,23 @@ body {
 .ga-send svg {
   width: 20px;
   height: 20px;
+}
+
+@media (max-width: 768px) {
+  .ga-main {
+    padding: 0.25rem;
+  }
+
+  .ga-chat {
+    max-width: none;
+    min-height: 58vh;
+  }
+
+  .ga-chat__center {
+    padding: 0.75rem 0.5rem 0;
+  }
+
+  .ga-composer {
+    padding: 0.75rem 0.5rem 0.75rem;
+  }
 }
