@@ -6,6 +6,7 @@ import os
 import requests
 from typing import List
 from urllib.parse import quote_plus, urlparse, parse_qs, urlencode, urlunparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from bs4 import BeautifulSoup
@@ -246,59 +247,51 @@ def scrape_amazon_searches(queries: List[str], products_per_search: int = 3) -> 
     clean_queries = [str(q or "").strip() for q in queries[:3] if str(q or "").strip()]
     if not clean_queries:
         return []
+    def _fetch_for_query(q: str) -> List[dict]:
+        seen = set()
+        items = []
 
-    # Prefer SerpAPI Amazon
-    if os.getenv("SERPAPI_API_KEY"):
-        out = []
-        for q in clean_queries:
-            seen = set()
+        # 1) SerpAPI first (per query)
+        if os.getenv("SERPAPI_API_KEY"):
             items = _serpapi_amazon_search(q, max_results=products_per_search)
-            filtered = [i for i in items if (i.get("title") or "").strip().lower() not in seen]
-            for i in filtered:
-                seen.add((i.get("title") or "").strip().lower())
-            if filtered:
-                out.append({"query": q, "products": filtered})
-        if out:
-            return out
 
-    # Fallback: Serper Shopping
-    if os.getenv("SERPER_API_KEY"):
-        out = []
-        for q in clean_queries:
-            seen = set()
+        # 2) Serper fallback (per query)
+        if not items and os.getenv("SERPER_API_KEY"):
             items = _serper_search(q, max_results=products_per_search, amazon_only=True)
-            filtered = [i for i in items if (i.get("title") or "").strip().lower() not in seen]
-            for i in filtered:
-                seen.add((i.get("title") or "").strip().lower())
-            if filtered:
-                out.append({"query": q, "products": filtered})
-        if out:
-            return out
 
-    # Fallback: Scrape Amazon via ScraperAPI
-    if os.getenv("SCRAPER_API_KEY"):
-        out = []
-        for q in clean_queries:
-            seen = set()
+        # 3) ScraperAPI fallback (per query)
+        if not items and os.getenv("SCRAPER_API_KEY"):
             url = build_amazon_search_url(q)
-            if not url:
-                continue
-            try:
-                html = _fetch_page(url)
-                items = _parse_amazon_search_results(html, max_per_page=products_per_search)
-                filtered = [i for i in items if (i.get("title") or "").strip().lower() not in seen]
-                for i in filtered:
-                    seen.add((i.get("title") or "").strip().lower())
-                if filtered:
-                    out.append({"query": q, "products": filtered})
-            except requests.exceptions.HTTPError as e:
-                if e.response and e.response.status_code == 401:
-                    print("ScraperAPI 401: Invalid key or no credits. Check SCRAPER_API_KEY.")
-                else:
-                    print("Amazon scrape error:", e.response.status_code if e.response else repr(e))
-            except Exception as e:
-                print("Amazon scrape error:", type(e).__name__)
-        if out:
-            return out
+            if url:
+                try:
+                    html = _fetch_page(url)
+                    items = _parse_amazon_search_results(html, max_per_page=products_per_search)
+                except requests.exceptions.HTTPError as e:
+                    if e.response and e.response.status_code == 401:
+                        print("ScraperAPI 401: Invalid key or no credits. Check SCRAPER_API_KEY.")
+                    else:
+                        print("Amazon scrape error:", e.response.status_code if e.response else repr(e))
+                except Exception as e:
+                    print("Amazon scrape error:", type(e).__name__)
 
-    return []
+        filtered = [i for i in items if (i.get("title") or "").strip().lower() not in seen]
+        for i in filtered:
+            seen.add((i.get("title") or "").strip().lower())
+        return filtered
+
+    # Fetch each query in parallel; preserve original query order in output.
+    max_workers = min(4, len(clean_queries)) if clean_queries else 1
+    out_by_idx = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_for_query, q): (idx, q) for idx, q in enumerate(clean_queries)}
+        for fut in as_completed(futures):
+            idx, q = futures[fut]
+            try:
+                filtered = fut.result() or []
+            except Exception as e:
+                print("Parallel query fetch error:", type(e).__name__)
+                filtered = []
+            if filtered:
+                out_by_idx[idx] = {"query": q, "products": filtered}
+
+    return [out_by_idx[i] for i in sorted(out_by_idx.keys())]

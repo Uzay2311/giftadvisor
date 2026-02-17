@@ -388,7 +388,6 @@
         '<div class="ga-loading">' +
         '<div class="ga-loading__spinner"></div>' +
         '<span class="ga-loading__text">' + safeText + '</span>' +
-        '<span class="ga-loading__dots"><span></span><span></span><span></span></span>' +
         '</div>';
     };
     renderLoadingState('');

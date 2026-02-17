@@ -340,12 +340,25 @@ def _rank_products_by_sections(
     multi_query = len(ordered_queries) > 1
     top_k = 3 if multi_query else 5
     sections = []
+    global_candidates = _flatten_product_candidates(raw_results, max_candidates=1000)
 
     for idx, q in enumerate(ordered_queries, start=1):
         row = next((r for r in raw_results if str(r.get("query") or "").strip() == q), None)
-        if not isinstance(row, dict):
-            continue
-        candidates = _flatten_product_candidates([row], max_candidates=1000)
+        row_candidates = _flatten_product_candidates([row], max_candidates=1000) if isinstance(row, dict) else []
+
+        # Rank with full pool visibility, but keep section intent via query_hints.
+        # Start with row-specific candidates and append remaining global ones.
+        candidates = []
+        seen = set()
+        for c in row_candidates + global_candidates:
+            cid = str(c.get("id") or "")
+            title = (c.get("title") or "").strip().lower()
+            key = cid or title
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            candidates.append(c)
+
         if not candidates:
             continue
         ranked = _rank_products_with_llm(
@@ -356,12 +369,52 @@ def _rank_products_by_sections(
             query_subtitles=[(q, subtitle_by_query.get(q, ""))],
             top_k=top_k,
         )
-        if not ranked:
+
+        # Enforce strict section integrity: keep only products that belong to this query bucket.
+        row_keys = set()
+        for rc in row_candidates:
+            t = (rc.get("title") or "").strip().lower()
+            l = ((rc.get("product") or {}).get("link") or "").strip().lower()
+            if t:
+                row_keys.add(("t", t))
+            if l:
+                row_keys.add(("l", l))
+        strict_ranked = []
+        used_keys = set()
+        for p in ranked or []:
+            t = (p.get("title") or "").strip().lower()
+            l = (p.get("link") or "").strip().lower()
+            in_row = (("t", t) in row_keys) or (("l", l) in row_keys)
+            if not in_row:
+                continue
+            key = ("t", t) if t else ("l", l)
+            if key in used_keys:
+                continue
+            used_keys.add(key)
+            strict_ranked.append(p)
+            if len(strict_ranked) >= top_k:
+                break
+
+        # Refill from the same query bucket if ranker picked out-of-bucket items.
+        if len(strict_ranked) < top_k:
+            for rc in row_candidates:
+                p = rc.get("product") or {}
+                t = (p.get("title") or "").strip().lower()
+                l = (p.get("link") or "").strip().lower()
+                key = ("t", t) if t else ("l", l)
+                if key in used_keys:
+                    continue
+                used_keys.add(key)
+                strict_ranked.append(p)
+                if len(strict_ranked) >= top_k:
+                    break
+
+        if not strict_ranked:
             continue
         sections.append({
             "query": f"category_{idx}",
             "subtitle": _friendly_section_title(q, subtitle_by_query.get(q, ""), idx),
-            "products": ranked,
+            "products": strict_ranked[:top_k],
         })
 
     return sections
@@ -547,6 +600,49 @@ def _strip_search_queries_from_reply(reply: str) -> str:
     return _compact_ui_text(t)
 
 
+def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> str:
+    """Remove redundant clarifying asks for fields that are already known."""
+    if not isinstance(reply, str):
+        return reply
+    if not isinstance(gift_context, dict):
+        return reply
+
+    import re
+    text = (reply or "").strip()
+    if not text:
+        return text
+
+    # If occasion is already known, strip only the occasion-ask fragments.
+    if gift_context.get("occasion"):
+        patterns = [
+            r"(?i)\b(?:could\s+you(?:\s+please)?|can\s+you|please)\s+(?:tell|share)(?:\s+me)?(?:\s+what(?:'s|\s+is))?\s+(?:the\s+)?occasion[^?.!]*[?.!]?",
+            r"(?i)\bwhat(?:'s|\s+is)\s+(?:the\s+)?occasion[^?.!]*[?.!]?",
+            r"(?i)\bis\s+it\s+(?:for\s+)?(?:a\s+)?(?:birthday|anniversary|wedding|holiday|graduation|baby\s*shower|housewarming|thank\s*you)[^?.!]*[?.!]?",
+            r"(?i)\b(?:for\s+)?(?:her|your\s+wife'?s?)\s+(?:birthday|anniversary|wedding|holiday|graduation|baby\s*shower|housewarming|thank\s*you)\??",
+            r"(?i)\b(?:occasion\s+for\s+the\s+gift)\b",
+        ]
+        for pat in patterns:
+            text = re.sub(pat, " ", text)
+
+        # Cleanup connective artifacts after fragment removal.
+        text = re.sub(r"(?i)\b(and|also)\s*(?:,)?\s*(and|also)\b", r"\1", text)
+        text = re.sub(r"\s*,\s*", ", ", text)
+        text = re.sub(r"\s{2,}", " ", text).strip(" ,;.-")
+
+        # Guard against awkward tiny remnants like "Great!"
+        if len(text) < 12:
+            has_budget = gift_context.get("budget_min") is not None or gift_context.get("budget_max") is not None
+            has_interests = bool(gift_context.get("interests"))
+            if not has_budget and not has_interests:
+                text = "Great! Could you share your budget and her interests?"
+            elif not has_budget:
+                text = "Great! Could you share your budget range?"
+            elif not has_interests:
+                text = "Great! Could you share her interests or hobbies?"
+
+    return _compact_ui_text(text)
+
+
 def _reply_asks_for_info(reply: str) -> bool:
     """True if the reply is asking a clarifying question—do not search in that case."""
     if not reply or not isinstance(reply, str):
@@ -727,6 +823,9 @@ def gift_advisor_chat():
         previous_queries = data.get("previous_queries")
         if not isinstance(gift_context, dict):
             gift_context = None
+        # Promote selected occasion chip into effective context so the LLM won't ask again.
+        occasion_ctx = {"occasion": occasion} if occasion else {}
+        effective_input_context = merge_search_state(gift_context, occasion_ctx)
 
         accept = (request.headers.get("Accept") or "").lower()
         wants_sse = "text/event-stream" in accept
@@ -735,8 +834,8 @@ def gift_advisor_chat():
         context_bits = []
         if occasion:
             context_bits.append(f"occasion={occasion}")
-        if gift_context:
-            context_bits.append(f"gift_context={json.dumps(gift_context, ensure_ascii=False)}")
+        if effective_input_context:
+            context_bits.append(f"gift_context={json.dumps(effective_input_context, ensure_ascii=False)}")
         if isinstance(previous_queries, list) and previous_queries:
             context_bits.append(f"previous_search_queries={json.dumps(previous_queries)}")
             context_bits.append("previous_products_shown=true")
@@ -772,9 +871,11 @@ def gift_advisor_chat():
             if not isinstance(reply, str) or not reply.strip():
                 reply = raw_fallback.strip() if raw_fallback else "[No content returned]"
             reply = _strip_search_queries_from_reply(_compact_ui_text(reply))
+            merged_out_context = merge_search_state(effective_input_context, out_gift_context or {})
+            reply = _avoid_reasking_known_fields(reply, merged_out_context)
             payload = {
                 "reply": reply,
-                "gift_context": out_gift_context or gift_context,
+                "gift_context": merged_out_context,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
             if products_by_query:
@@ -787,11 +888,11 @@ def gift_advisor_chat():
             raw = (resp.choices[0].message.content or "").strip()
             parsed, _ = _parse_or_fix_json(raw)
             effective_gift_context = merge_search_state(
-                gift_context,
+                effective_input_context,
                 parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
             )
             products_by_query = []
-            query_subtitles = _resolve_search_queries(parsed, raw, message, previous_queries, gift_context)
+            query_subtitles = _resolve_search_queries(parsed, raw, message, previous_queries, effective_input_context)
             if query_subtitles:
                 queries = [q for q, _ in query_subtitles]
                 logger.info(
@@ -905,12 +1006,12 @@ def gift_advisor_chat():
 
                 parsed, _ = _parse_or_fix_json(raw_buf)
                 effective_gift_context = merge_search_state(
-                    gift_context,
+                    effective_input_context,
                     parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
                 )
                 products_by_query = []
                 query_subtitles = _resolve_search_queries(
-                    parsed, raw_buf, message, previous_queries, gift_context
+                    parsed, raw_buf, message, previous_queries, effective_input_context
                 )
                 if query_subtitles:
                     queries = [q for q, _ in query_subtitles]
