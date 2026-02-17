@@ -11,7 +11,7 @@ from gift_advisor import gift_advisor_chat
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 app = Flask(__name__, static_folder="static", static_url_path="")
-app.config["DEBUG"] = True
+app.config["DEBUG"] = False
 CORS(app, supports_credentials=False)
 
 
@@ -31,4 +31,5 @@ def gift_advisor_route():
 
 
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
+
