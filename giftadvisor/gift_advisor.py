@@ -273,6 +273,7 @@ RULES (VERY IMPORTANT):
 14. If user asks for "more options", "other ideas", "something different", or is unhappy with current picks, keep ALL hard constraints but generate NEW creative query angles. Do not repeat prior queries from previous_search_queries/people_profiles context unless no alternatives exist.
 15. For "more options" requests with enough context, prefer search_strategy.mode="explore" with 3 diverse, non-overlapping query intents (e.g., accessories vs premium core product vs experiential gift) while preserving recipient, age fit, occasion, and budget.
 16. If user says "surprise me" (or similar open-ended intent), you may use a trending/explore approach and return diverse creative queries even when interests are limited. Still preserve known hard constraints (recipient, age fit, occasion, budget) and avoid repeating prior queries.
+17. If the user is asking to compare/rank/evaluate already shown products (e.g., "which one is best", "which should I pick", "compare these"), set search_strategy = null and answer using existing shortlisted products only (no new search).
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -283,6 +284,7 @@ Task:
 - Prioritize: recipient fit, occasion fit, budget fit, interest/brand fit, and reliability signals.
 - Reliability signals to prefer: higher rating, higher reviews, and stronger bought_last_month.
 - Avoid repetition: do NOT select near-duplicate products that are very similar in title/description/specs (e.g., same model with only minor variant differences) unless unique options are unavailable.
+- Deprioritize bulk/commercial listings (e.g., multi-pack classroom sets, wholesale packs, institutional bundles, large quantity lots) unless the user explicitly asks for bulk quantities.
 - Reject obvious mismatches (e.g., infant/kids products when recipient is an adult wife/woman) unless explicitly requested.
 - Prefer category diversity when multiple query categories are present; avoid selecting all products from one category unless clearly superior.
 - Do not invent products.
@@ -1135,11 +1137,12 @@ def _message_asks_about_shortlist(message: str) -> bool:
     if not m:
         return False
     triggers = (
-        "which", "best", "better", "compare", "difference", "worth", "value",
-        "reviews", "rating", "reliable", "should i buy", "recommend from",
-        "among these", "between these", "pick one", "top one", "why",
+        "which one", "which is best", "which one is best", "best one", "better one",
+        "compare", "difference", "worth", "value", "reviews", "rating", "reliable",
+        "should i buy", "recommend from", "among these", "between these", "between them",
+        "pick one", "top one", "which should i pick", "which should i choose", "from these",
     )
-    return ("?" in m) or any(t in m for t in triggers)
+    return any(t in m for t in triggers)
 
 
 def _answer_from_shortlist(
@@ -1388,6 +1391,20 @@ def gift_advisor_chat():
                 effective_input_context,
                 parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
             )
+            # If user asks about already shown products, do shortlist analysis only (no new search).
+            if previous_products_by_query and _message_asks_about_shortlist(message):
+                shortlist_reply = _answer_from_shortlist(
+                    message=message,
+                    history=history,
+                    gift_context=effective_gift_context,
+                    previous_products_by_query=previous_products_by_query,
+                )
+                if shortlist_reply:
+                    if not isinstance(parsed, dict):
+                        parsed = {"reply": shortlist_reply, "gift_context": {}, "search_strategy": None}
+                    parsed["reply"] = shortlist_reply
+                    parsed["search_strategy"] = None
+
             products_by_query = []
             query_subtitles = _resolve_search_queries(parsed, raw, message, previous_queries, effective_input_context)
             if query_subtitles:
@@ -1524,6 +1541,20 @@ def gift_advisor_chat():
                     effective_input_context,
                     parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
                 )
+                # If user asks about already shown products, do shortlist analysis only (no new search).
+                if previous_products_by_query and _message_asks_about_shortlist(message):
+                    shortlist_reply = _answer_from_shortlist(
+                        message=message,
+                        history=history,
+                        gift_context=effective_gift_context,
+                        previous_products_by_query=previous_products_by_query,
+                    )
+                    if shortlist_reply:
+                        if not isinstance(parsed, dict):
+                            parsed = {"reply": shortlist_reply, "gift_context": {}, "search_strategy": None}
+                        parsed["reply"] = shortlist_reply
+                        parsed["search_strategy"] = None
+
                 products_by_query = []
                 query_subtitles = _resolve_search_queries(
                     parsed, raw_buf, message, previous_queries, effective_input_context

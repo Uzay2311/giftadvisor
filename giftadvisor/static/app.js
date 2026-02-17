@@ -386,6 +386,12 @@
       stream: true,
     };
 
+    const controller = new AbortController();
+    const STREAM_TIMEOUT_MS = 70000;
+    const timeoutId = setTimeout(() => {
+      try { controller.abort(); } catch (_) {}
+    }, STREAM_TIMEOUT_MS);
+
     const res = await fetch(ENDPOINT, {
       method: 'POST',
       headers: {
@@ -393,6 +399,7 @@
         Accept: 'text/event-stream',
       },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
 
     if (!res.ok) {
@@ -411,6 +418,8 @@
     const reader = res.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
+    let finalReceived = false;
+    let doneReceived = false;
 
     function parseSseChunk(chunk) {
       buffer += chunk;
@@ -440,7 +449,10 @@
         } else if (event === 'products_loading' && obj && typeof obj === 'object') {
           if (typeof onProductsLoading === 'function') onProductsLoading(obj);
         } else if (event === 'final' && obj && typeof obj === 'object') {
+          finalReceived = true;
           onFinal(obj);
+        } else if (event === 'done') {
+          doneReceived = true;
         } else if (event === 'error') {
           const msg = (obj && (obj.error || obj.message)) || 'Server error';
           throw new Error(String(msg));
@@ -449,11 +461,21 @@
     }
 
     let done = false;
-    while (!done) {
-      const r = await reader.read();
-      done = !!r.done;
-      const chunk = decoder.decode(r.value || new Uint8Array(), { stream: !done });
-      if (chunk) parseSseChunk(chunk);
+    try {
+      while (!done) {
+        const r = await reader.read();
+        done = !!r.done;
+        const chunk = decoder.decode(r.value || new Uint8Array(), { stream: !done });
+        if (chunk) parseSseChunk(chunk);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!finalReceived) {
+      if (doneReceived) {
+        throw new Error('No final payload received from stream');
+      }
+      throw new Error('Stream ended before final response');
     }
   }
 
@@ -560,7 +582,10 @@
       );
     } catch (err) {
       typingBubble.innerHTML = '';
-      const errMsg = err.message || 'Unknown error';
+      let errMsg = err && err.message ? String(err.message) : 'Unknown error';
+      if (err && (err.name === 'AbortError' || /aborted|timed out/i.test(errMsg))) {
+        errMsg = 'Request timed out. Please try again.';
+      }
       typingBubble.textContent = `Sorry, something went wrong: ${errMsg}`;
       console.error('Gift Advisor error:', err);
       messages.push({ role: 'assistant', content: 'Error: ' + errMsg });
