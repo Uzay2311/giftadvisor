@@ -17,6 +17,7 @@
 
   const ENDPOINT = '/gift_advisor';
   const DEVICE_ID_KEY = 'giftadvisor_device_id_v1';
+  const INITIAL_ASSISTANT_MESSAGE = "Let's explore a great gift for someone you love.";
 
   let selectedOccasion = '';
   let selectedBudget = { min: null, max: null };
@@ -99,6 +100,14 @@
   function setHeroVisibility() {
     if (!heroEl) return;
     heroEl.classList.toggle('is-hidden', messages.length > 0);
+  }
+
+  function renderInitialAssistantMessage() {
+    if (!messagesEl) return;
+    if (heroEl) heroEl.classList.add('is-hidden');
+    messagesEl.classList.add('ga-messages--intro');
+    renderMessage('assistant', INITIAL_ASSISTANT_MESSAGE);
+    scheduleAutoScroll();
   }
 
   function normalize(text) {
@@ -479,10 +488,13 @@
     }
   }
 
+  renderInitialAssistantMessage();
+
   formEl.addEventListener('submit', async (e) => {
     e.preventDefault();
     const msg = (inputEl.value || '').trim();
     if (!msg) return;
+    messagesEl.classList.remove('ga-messages--intro');
 
     inputEl.value = '';
     inputEl.style.height = 'auto';

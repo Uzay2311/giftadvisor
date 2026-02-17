@@ -274,6 +274,7 @@ RULES (VERY IMPORTANT):
 15. For "more options" requests with enough context, prefer search_strategy.mode="explore" with 3 diverse, non-overlapping query intents (e.g., accessories vs premium core product vs experiential gift) while preserving recipient, age fit, occasion, and budget.
 16. If user says "surprise me" (or similar open-ended intent), you may use a trending/explore approach and return diverse creative queries even when interests are limited. Still preserve known hard constraints (recipient, age fit, occasion, budget) and avoid repeating prior queries.
 17. If the user is asking to compare/rank/evaluate already shown products (e.g., "which one is best", "which should I pick", "compare these"), set search_strategy = null and answer using existing shortlisted products only (no new search).
+18. If the user explicitly asks to explore/trending/surprise (e.g. "help me explore", "show me trending"), you may proceed with search_strategy even when interests are missing, as long as recipient + occasion + budget are already known.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -973,6 +974,8 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
             r"(?i)\bif\s+you\s+have\s+(?:a\s+)?specific\s+budget(?:\s+in\s+mind)?[^?.!]*[?.!]?",
             r"(?i)\bfeel\s+free\s+to\s+share\s+(?:that\s+as\s+well|your\s+budget(?:\s+range)?)\b[^?.!]*[?.!]?",
             r"(?i)\b(?:let\s+me\s+know|share|tell\s+me)\s+(?:if\s+you\s+have\s+)?(?:a\s+)?budget(?:\s+range)?\b[^?.!]*[?.!]?",
+            r"(?i)\byou\s+mentioned[^?.!]*\$\s*\d+[^?.!]*is\s+that\s+correct[^?.!]*[?.!]?",
+            r"(?i)\bare\s+you\s+still\s+comfortable\s+with[^?.!]*\$\s*\d+[^?.!]*[?.!]?",
         ]
         for pat in budget_patterns:
             text = re.sub(pat, " ", text)
@@ -997,10 +1000,17 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
         has_interests = bool(gift_context.get("interests"))
         has_product = bool(str(gift_context.get("product") or "").strip())
         has_recipient = bool(str(gift_context.get("recipient") or "").strip())
+        g = str(gift_context.get("gender") or "").strip().lower()
+        pronoun = "she" if g == "women" else "he" if g == "men" else "they"
+        interest_q = (
+            f"Great! What is {pronoun} into these days (hobbies, style, or favorite things)?"
+            if pronoun in ("she", "he")
+            else "Great! What are they into these days (hobbies, style, or favorite things)?"
+        )
         if not has_recipient:
             text = "Great! Who is the gift for?"
         elif not has_interests and not has_product:
-            text = "Great! What is she into these days (hobbies, style, or favorite things)?"
+            text = interest_q
         elif not has_budget:
             text = "Great! What budget range should I target?"
         else:
@@ -1176,6 +1186,40 @@ def _answer_from_shortlist(
     return None
 
 
+def _is_open_explore_intent(message: str) -> bool:
+    m = str(message or "").strip().lower()
+    if not m:
+        return False
+    patterns = (
+        r"\bshow\s+me\s+trending\b",
+        r"\bhelp\s+me\s+explore\b",
+        r"\blet'?s\s+explore\b",
+        r"\bsurprise\s+me\b",
+        r"\btrending\b",
+        r"\bmore\s+ideas\b",
+        r"\bopen\s+to\s+ideas\b",
+    )
+    return any(re.search(p, m, re.I) for p in patterns)
+
+
+def _is_affirmation(message: str) -> bool:
+    m = str(message or "").strip().lower()
+    return m in {"yes", "y", "ok", "okay", "sure", "sounds good", "go ahead", "yep"}
+
+
+def _allow_explore_without_interests(message: str, history: list) -> bool:
+    if _is_open_explore_intent(message):
+        return True
+    if _is_affirmation(message) and isinstance(history, list):
+        for h in reversed(history[-4:]):
+            if not isinstance(h, dict) or h.get("role") != "assistant":
+                continue
+            c = str(h.get("content") or "").lower()
+            if "open to a variety of gift ideas" in c or "more options" in c or "different style" in c:
+                return True
+    return False
+
+
 def _validate_payload(obj: dict) -> tuple[bool, str]:
     if not isinstance(obj, dict):
         return (False, "not an object")
@@ -1207,6 +1251,7 @@ def _resolve_search_queries(
     message: str,
     previous_queries: Optional[list],
     gift_context: Optional[dict],
+    allow_explore_without_interests: bool = False,
 ) -> list:
     """Resolve search queries only from structured JSON fields (no text fallbacks)."""
     if not isinstance(parsed, dict):
@@ -1225,7 +1270,13 @@ def _resolve_search_queries(
     has_interests = isinstance(interests, list) and any(str(i or "").strip() for i in interests)
     has_product = bool(str((effective_ctx or {}).get("product") or "").strip()) if isinstance(effective_ctx, dict) else False
     if not (has_interests or has_product):
-        return []
+        has_recipient = bool(str((effective_ctx or {}).get("recipient") or "").strip()) if isinstance(effective_ctx, dict) else False
+        has_occasion = bool(str((effective_ctx or {}).get("occasion") or "").strip()) if isinstance(effective_ctx, dict) else False
+        bmin = (effective_ctx or {}).get("budget_min") if isinstance(effective_ctx, dict) else None
+        bmax = (effective_ctx or {}).get("budget_max") if isinstance(effective_ctx, dict) else None
+        has_budget = bmin is not None or bmax is not None
+        if not (allow_explore_without_interests and has_recipient and has_occasion and has_budget):
+            return []
     query_subtitles = []
     for q in (strategy.get("queries") or [])[:3]:
         if isinstance(q, dict):
@@ -1338,6 +1389,7 @@ def gift_advisor_chat():
             context_bits.append("(no previous_search_queries—derive product, recipient, budget from conversation history below)")
 
         context_msg = "GIFT_CONTEXT: " + (", ".join(context_bits) if context_bits else "none")
+        allow_explore_no_interests = _allow_explore_without_interests(message, history)
 
         input_messages = [
             {"role": "developer", "content": GIFT_ADVISOR_SYSTEM_PROMPT},
@@ -1406,7 +1458,9 @@ def gift_advisor_chat():
                     parsed["search_strategy"] = None
 
             products_by_query = []
-            query_subtitles = _resolve_search_queries(parsed, raw, message, previous_queries, effective_input_context)
+            query_subtitles = _resolve_search_queries(
+                parsed, raw, message, previous_queries, effective_input_context, allow_explore_without_interests=allow_explore_no_interests
+            )
             if query_subtitles:
                 prev_map = {_query_key(r.get("query")): r for r in previous_products_by_query}
                 new_query_subtitles = [(q, s) for q, s in query_subtitles if _query_key(q) not in prev_map]
@@ -1557,7 +1611,7 @@ def gift_advisor_chat():
 
                 products_by_query = []
                 query_subtitles = _resolve_search_queries(
-                    parsed, raw_buf, message, previous_queries, effective_input_context
+                    parsed, raw_buf, message, previous_queries, effective_input_context, allow_explore_without_interests=allow_explore_no_interests
                 )
                 if query_subtitles:
                     prev_map = {_query_key(r.get("query")): r for r in previous_products_by_query}

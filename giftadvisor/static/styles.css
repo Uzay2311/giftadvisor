@@ -167,6 +167,15 @@ body {
 .ga-messages {
   flex: 1;
   min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.ga-messages.ga-messages--intro {
+  flex: 0 0 auto;
+  min-height: 0;
+  justify-content: flex-start;
 }
 
 .ga-msg {
@@ -592,6 +601,10 @@ body {
 
   .ga-chat__center {
     padding: 0.75rem 0.5rem 0;
+  }
+
+  .ga-messages {
+    min-height: 56px;
   }
 
   .ga-composer {
