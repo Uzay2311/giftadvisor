@@ -17,8 +17,6 @@
 
   const ENDPOINT = '/gift_advisor';
   const DEVICE_ID_KEY = 'giftadvisor_device_id_v1';
-  const OCCASION_KEY = 'giftadvisor_selected_occasion_v1';
-  const BUDGET_KEY = 'giftadvisor_selected_budget_v1';
 
   let selectedOccasion = '';
   let selectedBudget = { min: null, max: null };
@@ -49,56 +47,11 @@
   }
 
   const deviceId = getOrCreateDeviceId();
-
-  function loadPersistedSelections() {
-    try {
-      const occ = (localStorage.getItem(OCCASION_KEY) || '').trim();
-      if (occ) selectedOccasion = occ;
-      const budgetRaw = localStorage.getItem(BUDGET_KEY);
-      if (budgetRaw) {
-        const b = JSON.parse(budgetRaw);
-        selectedBudget = {
-          min: Number.isFinite(Number(b?.min)) ? Number(b.min) : null,
-          max: Number.isFinite(Number(b?.max)) ? Number(b.max) : null,
-        };
-      }
-    } catch (_) {}
-  }
-
-  function persistSelections() {
-    try {
-      if (selectedOccasion) localStorage.setItem(OCCASION_KEY, selectedOccasion);
-      else localStorage.removeItem(OCCASION_KEY);
-      localStorage.setItem(BUDGET_KEY, JSON.stringify(selectedBudget || {}));
-    } catch (_) {}
-  }
-
-  function hydrateChipSelections() {
-    if (chipsEl && selectedOccasion) {
-      const btn = chipsEl.querySelector(`[data-occasion="${selectedOccasion}"]`);
-      if (btn) {
-        chipsEl.querySelectorAll('.ga-chip').forEach((c) => c.classList.remove('is-active'));
-        btn.classList.add('is-active');
-      }
-    }
-    if (budgetChipsEl) {
-      let matched = null;
-      const targetMin = Number.isFinite(selectedBudget.min) ? selectedBudget.min : null;
-      const targetMax = Number.isFinite(selectedBudget.max) ? selectedBudget.max : null;
-      budgetChipsEl.querySelectorAll('.ga-chip').forEach((btn) => {
-        const bmin = Number.parseInt(btn.dataset.budgetMin || '', 10);
-        const bmax = Number.parseInt(btn.dataset.budgetMax || '', 10);
-        const min = Number.isFinite(bmin) ? bmin : null;
-        const max = Number.isFinite(bmax) ? bmax : null;
-        const same = min === targetMin && max === targetMax;
-        if (same) matched = btn;
-        btn.classList.remove('is-active');
-      });
-      if (matched) matched.classList.add('is-active');
-    }
-  }
-
-  loadPersistedSelections();
+  // Do not persist chip selections; clear any legacy stored values.
+  try {
+    localStorage.removeItem('giftadvisor_selected_occasion_v1');
+    localStorage.removeItem('giftadvisor_selected_budget_v1');
+  } catch (_) {}
 
   /* Occasion selection */
   if (chipsEl) {
@@ -108,7 +61,6 @@
       chipsEl.querySelectorAll('.ga-chip').forEach((c) => c.classList.remove('is-active'));
       btn.classList.add('is-active');
       selectedOccasion = btn.dataset.occasion || '';
-      persistSelections();
     });
   }
 
@@ -127,11 +79,8 @@
         min: Number.isFinite(min) ? min : null,
         max: Number.isFinite(max) ? max : null,
       };
-      persistSelections();
     });
   }
-
-  hydrateChipSelections();
 
   /* Auto-resize textarea */
   if (inputEl) {
