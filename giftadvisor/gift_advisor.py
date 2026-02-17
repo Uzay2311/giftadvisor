@@ -41,7 +41,8 @@ def _call_llm(messages: list, stream: bool = False):
     return client.chat.completions.create(
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         messages=chat_messages,
-        temperature=0.6,
+        temperature=0.2,
+        response_format={"type": "json_object"},
         stream=stream,
     )
 
@@ -82,6 +83,7 @@ Formatting:
 
 GIFT_ADVISOR_ENRICHMENT = """
 Return structured JSON only. The "reply" field must contain your actual conversational response to the user—never a placeholder or schema description.
+Do not include markdown fences, explanations, or any text before/after the JSON object.
 
 {
   "reply": "Your actual reply text here",
@@ -125,6 +127,7 @@ RULES (VERY IMPORTANT):
 8. NEVER search when gathering info. If your reply ASKS for occasion, budget, or interests, return search_strategy = null. No products—just the question. One question per turn.
 9. Only return search_strategy (and trigger a search) when you have occasion + budget + (interests or product). Until then, ask for what's missing and return null. Do NOT search and ask in the same turn.
 10. When the user has provided enough (occasion, budget, interests/product), return search_strategy with queries. Do NOT return null when you have enough context.
+11. Treat values already present in gift_context (including UI-selected occasion/budget) as known facts; do not ask for them again.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -132,7 +135,9 @@ You are a product ranking assistant for gift recommendations.
 
 Task:
 - Select the best top_k products from candidate products for the given context.
-- Prioritize: recipient fit, occasion fit, budget fit, interest/brand fit, product quality signals (rating/reviews).
+- Prioritize: recipient fit, occasion fit, budget fit, interest/brand fit, and reliability signals.
+- Reliability signals to prefer: higher rating, higher reviews, and stronger bought_last_month.
+- Avoid repetition: do NOT select near-duplicate products that are very similar in title/description/specs (e.g., same model with only minor variant differences) unless unique options are unavailable.
 - Reject obvious mismatches (e.g., infant/kids products when recipient is an adult wife/woman) unless explicitly requested.
 - Prefer category diversity when multiple query categories are present; avoid selecting all products from one category unless clearly superior.
 - Do not invent products.
@@ -140,6 +145,20 @@ Task:
 {
   "selected_ids": ["p1", "p4", "p2", "p7", "p3"],
   "reasons": ["short reason 1", "short reason 2", "short reason 3", "short reason 4", "short reason 5"]
+}
+""".strip()
+
+SHORTLIST_QA_PROMPT = """
+You are a gift advisor assistant answering follow-up questions about products already shortlisted in this chat.
+
+Rules:
+- Use ONLY the shortlisted products provided by the user payload.
+- Do NOT propose new searches or new products.
+- If the answer cannot be determined from shortlist data, say so clearly.
+- Keep the answer concise, practical, and user-facing.
+- Return ONLY valid JSON:
+{
+  "reply": "string"
 }
 """.strip()
 
@@ -186,6 +205,7 @@ def _flatten_product_candidates(raw_results: list, max_candidates: int = 1000) -
                 "price": (p.get("price") or "").strip(),
                 "rating": p.get("rating"),
                 "reviews": p.get("reviews"),
+                "bought_last_month": p.get("bought_last_month"),
                 "product": p,
             })
             idx += 1
@@ -216,6 +236,7 @@ def _rank_products_with_llm(
             "price": c.get("price"),
             "rating": c.get("rating"),
             "reviews": c.get("reviews"),
+            "bought_last_month": c.get("bought_last_month"),
         })
 
     user_payload = {
@@ -705,11 +726,86 @@ def _apply_budget_to_query_subtitles(query_subtitles: list, gift_context: Option
     return out
 
 
+def _query_key(q: str) -> str:
+    return " ".join(str(q or "").strip().lower().split())
+
+
+def _normalize_products_by_query(items: Optional[list]) -> list:
+    if not isinstance(items, list):
+        return []
+    out = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        q = str(row.get("query") or "").strip()
+        products = row.get("products")
+        if not q or not isinstance(products, list) or not products:
+            continue
+        subtitle = str(row.get("subtitle") or "").strip()
+        clean_products = [p for p in products if isinstance(p, dict) and (p.get("title") or p.get("link"))]
+        if not clean_products:
+            continue
+        out.append({"query": q, "subtitle": subtitle, "products": clean_products})
+    return out
+
+
+def _message_asks_about_shortlist(message: str) -> bool:
+    m = str(message or "").strip().lower()
+    if not m:
+        return False
+    triggers = (
+        "which", "best", "better", "compare", "difference", "worth", "value",
+        "reviews", "rating", "reliable", "should i buy", "recommend from",
+        "among these", "between these", "pick one", "top one", "why",
+    )
+    return ("?" in m) or any(t in m for t in triggers)
+
+
+def _answer_from_shortlist(
+    message: str,
+    history: list,
+    gift_context: Optional[dict],
+    previous_products_by_query: list,
+) -> Optional[str]:
+    shortlist = _normalize_products_by_query(previous_products_by_query)
+    if not shortlist:
+        return None
+    payload = {
+        "user_message": message,
+        "gift_context": gift_context or {},
+        "recent_history": history[-8:] if isinstance(history, list) else [],
+        "shortlisted_products_by_query": shortlist,
+    }
+    qa_messages = [
+        {"role": "developer", "content": SHORTLIST_QA_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    try:
+        resp = _call_llm(qa_messages, stream=False)
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = _safe_json_loads(raw)
+        reply = parsed.get("reply") if isinstance(parsed, dict) else None
+        if isinstance(reply, str) and reply.strip():
+            return reply.strip()
+    except Exception as e:
+        logger.warning("Shortlist QA call failed: %s", e)
+    return None
+
+
 def _validate_payload(obj: dict) -> tuple[bool, str]:
     if not isinstance(obj, dict):
         return (False, "not an object")
+    required = ("reply", "gift_context", "search_strategy")
+    for k in required:
+        if k not in obj:
+            return (False, f"missing required key: {k}")
     if "reply" not in obj or not isinstance(obj.get("reply"), str) or not obj.get("reply", "").strip():
         return (False, "missing/invalid reply")
+    if not isinstance(obj.get("gift_context"), dict):
+        return (False, "missing/invalid gift_context")
+    strategy = obj.get("search_strategy")
+    if strategy is not None and not isinstance(strategy, dict):
+        return (False, "missing/invalid search_strategy")
     return (True, "")
 
 
@@ -728,81 +824,29 @@ def _resolve_search_queries(
     previous_queries: Optional[list],
     gift_context: Optional[dict],
 ) -> list:
-    """Resolve search queries. Trust LLM when it returns null—no search. Only use fallbacks when field is omitted."""
+    """Resolve search queries only from structured JSON fields (no text fallbacks)."""
+    if not isinstance(parsed, dict):
+        return []
+    effective_ctx = merge_search_state(
+        gift_context,
+        parsed.get("gift_context") if isinstance(parsed.get("gift_context"), dict) else {}
+    )
+    strategy = parsed.get("search_strategy")
+    if strategy is None:
+        return []
+    if not isinstance(strategy, dict):
+        return []
     query_subtitles = []
-    if isinstance(parsed, dict):
-        strategy = parsed.get("search_strategy")
-        sq_list = parsed.get("search_queries")
-        effective_ctx = merge_search_state(
-            gift_context,
-            parsed.get("gift_context") if isinstance(parsed.get("gift_context"), dict) else {}
-        )
-        if strategy is None and "search_strategy" in parsed:
-            return []
-        reply_text = (parsed.get("reply") or "").strip()
-        if _reply_asks_for_info(reply_text):
-            return []
-        if isinstance(strategy, dict):
-            queries = strategy.get("queries") or []
-            for q in queries[:3]:
-                if isinstance(q, dict):
-                    query = (q.get("query") or "").strip()
-                    sub = (q.get("subtitle") or "").strip()
-                else:
-                    query = str(q or "").strip()
-                    sub = ""
-                if query:
-                    query_subtitles.append((query, sub))
-            return _apply_budget_to_query_subtitles(query_subtitles, effective_ctx)
-        if "search_queries" in parsed:
-            if isinstance(sq_list, list) and sq_list:
-                query_subtitles = _parse_search_queries(sq_list)
-            elif isinstance(parsed.get("search_query"), str):
-                sq = (parsed.get("search_query") or "").strip()
-                if sq:
-                    query_subtitles = [(sq, "")]
-            else:
-                return []
+    for q in (strategy.get("queries") or [])[:3]:
+        if isinstance(q, dict):
+            query = (q.get("query") or "").strip()
+            sub = (q.get("subtitle") or "").strip()
         else:
-            reply_text = (parsed.get("reply") or "").strip()
-            if _reply_asks_for_info(reply_text):
-                return []
-            merged_ctx = merge_search_state(gift_context, parsed.get("gift_context") if isinstance(parsed.get("gift_context"), dict) else {})
-            queries = []
-            if merged_ctx and merged_ctx.get("product"):
-                queries = _derive_queries_from_gift_context(merged_ctx, message)
-            if not queries:
-                queries = _extract_search_queries_from_reply((parsed.get("reply") or "").strip() or (raw_text or "").strip())
-            if not queries:
-                queries = _user_message_to_search_queries(message)
-            if not queries and isinstance(previous_queries, list) and previous_queries:
-                queries = [str(q).strip() for q in previous_queries[:3] if str(q).strip()]
-            if not queries and merged_ctx:
-                queries = _derive_queries_from_gift_context(merged_ctx, message)
-            query_subtitles = [(q, "") for q in queries if q]
-        query_subtitles = _apply_budget_to_query_subtitles(query_subtitles, effective_ctx)
-    else:
-        reply_text = (raw_text or "").strip()
-        parsed_reply = _extract_first_json_object(reply_text)
-        if isinstance(parsed_reply, dict) and parsed_reply.get("reply"):
-            reply_text = (parsed_reply.get("reply") or "").strip()
-        if _reply_asks_for_info(reply_text):
-            return []
-        merged_ctx = gift_context
-        queries = []
-        if merged_ctx and merged_ctx.get("product"):
-            queries = _derive_queries_from_gift_context(merged_ctx, message)
-        if not queries:
-            queries = _extract_search_queries_from_reply(reply_text)
-        if not queries:
-            queries = _user_message_to_search_queries(message)
-        if not queries and isinstance(previous_queries, list) and previous_queries:
-            queries = [str(q).strip() for q in previous_queries[:3] if str(q).strip()]
-        if not queries and merged_ctx:
-            queries = _derive_queries_from_gift_context(merged_ctx, message)
-        query_subtitles = [(q, "") for q in queries if q]
-        query_subtitles = _apply_budget_to_query_subtitles(query_subtitles, merged_ctx)
-    return query_subtitles
+            query = str(q or "").strip()
+            sub = ""
+        if query:
+            query_subtitles.append((query, sub))
+    return _apply_budget_to_query_subtitles(query_subtitles, effective_ctx)
 
 
 
@@ -821,6 +865,7 @@ def gift_advisor_chat():
         history = _normalize_history(data.get("history") or [])
         gift_context = data.get("gift_context")
         previous_queries = data.get("previous_queries")
+        previous_products_by_query = _normalize_products_by_query(data.get("previous_products_by_query"))
         if not isinstance(gift_context, dict):
             gift_context = None
         # Promote selected occasion chip into effective context so the LLM won't ask again.
@@ -836,7 +881,11 @@ def gift_advisor_chat():
             context_bits.append(f"occasion={occasion}")
         if effective_input_context:
             context_bits.append(f"gift_context={json.dumps(effective_input_context, ensure_ascii=False)}")
-        if isinstance(previous_queries, list) and previous_queries:
+        if previous_products_by_query:
+            prev_q = [r.get("query") for r in previous_products_by_query if r.get("query")]
+            context_bits.append(f"previous_search_queries={json.dumps(prev_q, ensure_ascii=False)}")
+            context_bits.append("previous_products_shown=true")
+        elif isinstance(previous_queries, list) and previous_queries:
             context_bits.append(f"previous_search_queries={json.dumps(previous_queries)}")
             context_bits.append("previous_products_shown=true")
         elif history:
@@ -855,7 +904,7 @@ def gift_advisor_chat():
 
         def _parse_or_fix_json(raw_text: str):
             raw_text = (raw_text or "").strip()
-            parsed = _extract_first_json_object(raw_text) if raw_text else None
+            parsed = _safe_json_loads(raw_text) if raw_text else None
             ok, _ = _validate_payload(parsed) if isinstance(parsed, dict) else (False, "parse failed")
             if ok:
                 return parsed, raw_text
@@ -894,6 +943,9 @@ def gift_advisor_chat():
             products_by_query = []
             query_subtitles = _resolve_search_queries(parsed, raw, message, previous_queries, effective_input_context)
             if query_subtitles:
+                prev_map = {_query_key(r.get("query")): r for r in previous_products_by_query}
+                new_query_subtitles = [(q, s) for q, s in query_subtitles if _query_key(q) not in prev_map]
+                unchanged = len(new_query_subtitles) == 0
                 queries = [q for q, _ in query_subtitles]
                 logger.info(
                     "[GIFT_ADVISOR] product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | context=%s | llm_search_queries=%s | resolved=%s | queries_submitted=%s",
@@ -902,18 +954,33 @@ def gift_advisor_chat():
                     previous_queries,
                     gift_context,
                     context_msg[:200] + "..." if len(context_msg) > 200 else context_msg,
-                    parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                    parsed.get("search_strategy") if isinstance(parsed, dict) else None,
                     query_subtitles,
-                    queries,
+                    [q for q, _ in new_query_subtitles] if not unchanged else [],
                 )
-                raw_results = scrape_amazon_searches(queries, products_per_search=PRODUCTS_PER_SEARCH)
-                products_by_query = _rank_products_by_sections(
-                    raw_results=raw_results,
-                    query_subtitles=query_subtitles,
-                    message=message,
-                    history=history,
-                    gift_context=effective_gift_context,
-                )
+                if unchanged:
+                    # Same query set as already shown: avoid repetitive re-render/search.
+                    if previous_products_by_query and _message_asks_about_shortlist(message):
+                        shortlist_reply = _answer_from_shortlist(
+                            message=message,
+                            history=history,
+                            gift_context=effective_gift_context,
+                            previous_products_by_query=previous_products_by_query,
+                        )
+                        if shortlist_reply and isinstance(parsed, dict):
+                            parsed["reply"] = shortlist_reply
+                            parsed["search_strategy"] = None
+                else:
+                    raw_results = scrape_amazon_searches(
+                        [q for q, _ in new_query_subtitles], products_per_search=PRODUCTS_PER_SEARCH
+                    )
+                    products_by_query = _rank_products_by_sections(
+                        raw_results=raw_results,
+                        query_subtitles=new_query_subtitles,
+                        message=message,
+                        history=history,
+                        gift_context=effective_gift_context,
+                    )
             else:
                 logger.info(
                     "[GIFT_ADVISOR] no_product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | llm_search_queries=%s | resolved=[]",
@@ -921,7 +988,7 @@ def gift_advisor_chat():
                     json.dumps(history[-6:] if history else [], ensure_ascii=False),
                     previous_queries,
                     gift_context,
-                    parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                    parsed.get("search_strategy") if isinstance(parsed, dict) else None,
                 )
             payload = _finalize_payload(parsed, raw, products_by_query=products_by_query if products_by_query else None)
             return jsonify(payload)
@@ -1014,6 +1081,9 @@ def gift_advisor_chat():
                     parsed, raw_buf, message, previous_queries, effective_input_context
                 )
                 if query_subtitles:
+                    prev_map = {_query_key(r.get("query")): r for r in previous_products_by_query}
+                    new_query_subtitles = [(q, s) for q, s in query_subtitles if _query_key(q) not in prev_map]
+                    unchanged = len(new_query_subtitles) == 0
                     queries = [q for q, _ in query_subtitles]
                     logger.info(
                         "[GIFT_ADVISOR] product_search (stream) | message=%r | history=%s | previous_queries=%s | gift_context=%s | context=%s | llm_search_queries=%s | resolved=%s | queries_submitted=%s",
@@ -1022,26 +1092,42 @@ def gift_advisor_chat():
                         previous_queries,
                         gift_context,
                         context_msg[:200] + "..." if len(context_msg) > 200 else context_msg,
-                        parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                        parsed.get("search_strategy") if isinstance(parsed, dict) else None,
                         query_subtitles,
-                        queries,
+                        [q for q, _ in new_query_subtitles] if not unchanged else [],
                     )
-                    yield _sse("products_loading", {"queries": queries})
-                    raw_results = scrape_amazon_searches(queries, products_per_search=PRODUCTS_PER_SEARCH)
-                    products_by_query = _rank_products_by_sections(
-                        raw_results=raw_results,
-                        query_subtitles=query_subtitles,
-                        message=message,
-                        history=history,
-                        gift_context=effective_gift_context,
-                    )
+                    if unchanged:
+                        # Same query set as already shown: avoid repetitive re-render/search.
+                        if previous_products_by_query and _message_asks_about_shortlist(message):
+                            shortlist_reply = _answer_from_shortlist(
+                                message=message,
+                                history=history,
+                                gift_context=effective_gift_context,
+                                previous_products_by_query=previous_products_by_query,
+                            )
+                            if shortlist_reply and isinstance(parsed, dict):
+                                parsed["reply"] = shortlist_reply
+                                parsed["search_strategy"] = None
+                    else:
+                        incremental_queries = [q for q, _ in new_query_subtitles]
+                        yield _sse("products_loading", {"queries": incremental_queries})
+                        raw_results = scrape_amazon_searches(
+                            incremental_queries, products_per_search=PRODUCTS_PER_SEARCH
+                        )
+                        products_by_query = _rank_products_by_sections(
+                            raw_results=raw_results,
+                            query_subtitles=new_query_subtitles,
+                            message=message,
+                            history=history,
+                            gift_context=effective_gift_context,
+                        )
                 else:
                     logger.info(
                         "[GIFT_ADVISOR] no_product_search (stream) | message=%r | previous_queries=%s | gift_context=%s | llm_search_queries=%s",
                         message,
                         previous_queries,
                         gift_context,
-                        parsed.get("search_queries") if isinstance(parsed, dict) else None,
+                        parsed.get("search_strategy") if isinstance(parsed, dict) else None,
                     )
                 payload = _finalize_payload(parsed, raw_buf, products_by_query=products_by_query if products_by_query else None)
                 yield _sse("final", payload)

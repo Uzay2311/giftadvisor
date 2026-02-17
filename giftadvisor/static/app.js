@@ -13,10 +13,12 @@
   const heroEl = app.querySelector('[data-ga-hero]');
   const occasionEl = app.querySelector('[data-ga-occasion]');
   const chipsEl = app.querySelector('[data-ga-chips]');
+  const budgetChipsEl = app.querySelector('[data-ga-budget-chips]');
 
   const ENDPOINT = '/gift_advisor';
 
   let selectedOccasion = '';
+  let selectedBudget = { min: null, max: null };
   let messages = [];
 
   /* Occasion selection */
@@ -27,6 +29,24 @@
       chipsEl.querySelectorAll('.ga-chip').forEach((c) => c.classList.remove('is-active'));
       btn.classList.add('is-active');
       selectedOccasion = btn.dataset.occasion || '';
+    });
+  }
+
+  /* Budget selection */
+  if (budgetChipsEl) {
+    budgetChipsEl.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-budget-min],[data-budget-max]');
+      if (!btn) return;
+      budgetChipsEl.querySelectorAll('.ga-chip').forEach((c) => c.classList.remove('is-active'));
+      btn.classList.add('is-active');
+      const minRaw = btn.dataset.budgetMin;
+      const maxRaw = btn.dataset.budgetMax;
+      const min = Number.parseInt(minRaw || '', 10);
+      const max = Number.parseInt(maxRaw || '', 10);
+      selectedBudget = {
+        min: Number.isFinite(min) ? min : null,
+        max: Number.isFinite(max) ? max : null,
+      };
     });
   }
 
@@ -266,17 +286,36 @@
   function getAccumulatedContext() {
     const assistants = messages.filter((m) => m.role === 'assistant');
     let giftContext = {};
-    let previousQueries = [];
+    const previousProductsMap = new Map();
     for (const a of assistants) {
       if (a.gift_context && typeof a.gift_context === 'object') {
         giftContext = { ...giftContext, ...a.gift_context };
       }
       if (a.products_by_query && Array.isArray(a.products_by_query)) {
-        const qs = a.products_by_query.map((p) => p.query).filter(Boolean);
-        if (qs.length > 0) previousQueries = qs;
+        for (const row of a.products_by_query) {
+          if (!row || !row.query || !Array.isArray(row.products) || row.products.length === 0) continue;
+          const key = String(row.query).trim().toLowerCase();
+          if (!key) continue;
+          previousProductsMap.set(key, row);
+        }
       }
     }
-    return { gift_context: giftContext, previous_queries: previousQueries };
+    const previousProductsByQuery = Array.from(previousProductsMap.values());
+    const previousQueries = previousProductsByQuery.map((p) => p.query).filter(Boolean);
+    if (selectedOccasion) {
+      giftContext.occasion = selectedOccasion;
+    }
+    if (Number.isFinite(selectedBudget.min)) {
+      giftContext.budget_min = selectedBudget.min;
+    }
+    if (Number.isFinite(selectedBudget.max)) {
+      giftContext.budget_max = selectedBudget.max;
+    }
+    return {
+      gift_context: giftContext,
+      previous_queries: previousQueries,
+      previous_products_by_query: previousProductsByQuery,
+    };
   }
 
   async function callBackendStream(msg, onDelta, onFinal, onProductsLoading) {
@@ -285,13 +324,14 @@
       .map((m) => ({ role: m.role, content: m.content }))
       .slice(-16);
 
-    const { gift_context, previous_queries } = getAccumulatedContext();
+    const { gift_context, previous_queries, previous_products_by_query } = getAccumulatedContext();
     const payload = {
       message: msg,
       history,
       occasion: selectedOccasion,
       gift_context: Object.keys(gift_context).length > 0 ? gift_context : undefined,
       previous_queries: previous_queries.length > 0 ? previous_queries : undefined,
+      previous_products_by_query: previous_products_by_query.length > 0 ? previous_products_by_query : undefined,
       stream: true,
     };
 

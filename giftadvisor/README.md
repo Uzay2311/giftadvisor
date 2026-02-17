@@ -6,7 +6,7 @@ A standalone gift recommendation website that helps people find the perfect gift
 
 - **Occasion-focused**: Birthday, anniversary, wedding, holiday, graduation, baby shower, housewarming, thank you
 - **Conversational AI**: Asks about the recipient, budget, and preferences to suggest personalized gifts
-- **Amazon products**: SerpAPI Amazon engine returns native Amazon URLs; fallbacks: Serper Shopping, ScraperAPI scraping
+- **Amazon products**: SerpAPI Amazon engine returns native Amazon URLs
 - **Product carousel**: Image, title, brief description, price; horizontal scroll
 - **Streaming responses**: Real-time typing effect for a natural chat experience
 - **Standalone**: No Shopify dependency—runs as its own web app
@@ -31,7 +31,7 @@ A standalone gift recommendation website that helps people find the perfect gift
 
    ```bash
    OPENAI_API_KEY=sk-your-key-here
-   SERPAPI_API_KEY=your-serpapi-key   # For Amazon products (serpapi.com, engine=amazon). Falls back to Serper/ScraperAPI.
+   SERPAPI_API_KEY=your-serpapi-key   # For Amazon products (serpapi.com, engine=amazon)
    ```
 
    Optional: `OPENAI_MODEL` (default: `gpt-4o-mini`), `AMAZON_AFFILIATE_TAG` (default: bestgift0514-20)

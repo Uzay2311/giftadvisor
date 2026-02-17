@@ -113,6 +113,10 @@ body {
   color: var(--text-muted);
 }
 
+.ga-occasion__label--sub {
+  margin-top: 0.9rem;
+}
+
 .ga-occasion__chips {
   display: flex;
   flex-wrap: wrap;
