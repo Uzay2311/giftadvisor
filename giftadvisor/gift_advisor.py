@@ -265,13 +265,14 @@ RULES (VERY IMPORTANT):
 6. subtitle MUST be a short, user-friendly display title (e.g. "Thoughtful picks for her", "Gifts for her 45th"). NEVER use the raw search query as subtitle.
 7. reply MUST NEVER include search queries.
 8. NEVER search when gathering info. If your reply ASKS for occasion, budget, or interests, return search_strategy = null. No products—just the question. One question per turn.
-9. Only return search_strategy (and trigger a search) when you have occasion + budget + (interests or product). Until then, ask for what's missing and return null. Do NOT search and ask in the same turn.
+9. Only return search_strategy (and trigger a search) when you have occasion + budget + (interests/hobbies or explicit product). Until then, ask for what's missing and return null. Do NOT search and ask in the same turn.
 10. When the user has provided enough (occasion, budget, interests/product), return search_strategy with queries. Do NOT return null when you have enough context.
 11. Treat values already present in gift_context (including UI-selected occasion/budget) as known facts; do not ask for them again.
 12. Mention on-screen occasion/budget options ONLY when either occasion or budget is still missing. If occasion and budget are already known in gift_context, do NOT mention on-screen options.
 13. Ask for recipient age (or age range) as part of exploration. If the recipient is a child/teen (e.g., son, daughter, kid, teenager, 13-17), collect age before any product search.
 14. If user asks for "more options", "other ideas", "something different", or is unhappy with current picks, keep ALL hard constraints but generate NEW creative query angles. Do not repeat prior queries from previous_search_queries/people_profiles context unless no alternatives exist.
 15. For "more options" requests with enough context, prefer search_strategy.mode="explore" with 3 diverse, non-overlapping query intents (e.g., accessories vs premium core product vs experiential gift) while preserving recipient, age fit, occasion, and budget.
+16. If user says "surprise me" (or similar open-ended intent), you may use a trending/explore approach and return diverse creative queries even when interests are limited. Still preserve known hard constraints (recipient, age fit, occasion, budget) and avoid repeating prior queries.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -1006,6 +1007,44 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
     return _compact_ui_text(text)
 
 
+def _ensure_next_step(reply: str, gift_context: Optional[dict], has_products: bool = False) -> str:
+    """Ensure assistant reply always contains a clear next step."""
+    text = _compact_ui_text(reply or "")
+    if not text:
+        text = "I can help with that."
+    lower = text.lower()
+
+    # If we already provide an explicit question, keep it.
+    if "?" in text:
+        return text
+
+    if has_products:
+        # After showing products, guide users to a clear refinement path.
+        return _compact_ui_text(
+            f"{text} Would you like more options, a different style, or a tighter budget range?"
+        )
+
+    ctx = gift_context if isinstance(gift_context, dict) else {}
+    has_recipient = bool(str(ctx.get("recipient") or "").strip())
+    has_occasion = bool(str(ctx.get("occasion") or "").strip())
+    has_budget = ctx.get("budget_min") is not None or ctx.get("budget_max") is not None
+    has_interest = bool(ctx.get("interests")) or bool(str(ctx.get("product") or "").strip())
+
+    if not has_recipient:
+        return "Great! Who is the gift for?"
+    if not has_occasion:
+        return "Great! What is the occasion?"
+    if not has_budget:
+        return "Great! What budget range should I target?"
+    if not has_interest:
+        return "Great! What are they into these days (hobbies, style, or favorite things)?"
+
+    # Context is sufficient but LLM still returned a closed statement.
+    if any(k in lower for k in ("thank you", "this will help", "great", "perfect", "got it")):
+        return "Great! Would you like me to search now, or refine the gift type first?"
+    return _compact_ui_text(f"{text} What should I optimize for first: style, practicality, or uniqueness?")
+
+
 def _reply_asks_for_info(reply: str) -> bool:
     """True if the reply is asking a clarifying question—do not search in that case."""
     if not reply or not isinstance(reply, str):
@@ -1178,6 +1217,12 @@ def _resolve_search_queries(
         return []
     if not isinstance(strategy, dict):
         return []
+    # Hard gate: never search unless we have interests/hobbies or an explicit product.
+    interests = effective_ctx.get("interests") if isinstance(effective_ctx, dict) else None
+    has_interests = isinstance(interests, list) and any(str(i or "").strip() for i in interests)
+    has_product = bool(str((effective_ctx or {}).get("product") or "").strip()) if isinstance(effective_ctx, dict) else False
+    if not (has_interests or has_product):
+        return []
     query_subtitles = []
     for q in (strategy.get("queries") or [])[:3]:
         if isinstance(q, dict):
@@ -1320,6 +1365,7 @@ def gift_advisor_chat():
             reply = _strip_search_queries_from_reply(_compact_ui_text(reply))
             merged_out_context = merge_search_state(effective_input_context, out_gift_context or {})
             reply = _avoid_reasking_known_fields(reply, merged_out_context)
+            reply = _ensure_next_step(reply, merged_out_context, has_products=bool(products_by_query))
             updated_profiles = _update_active_profile_context(people_profiles, active_profile_id, merged_out_context)
             payload = {
                 "reply": reply,
