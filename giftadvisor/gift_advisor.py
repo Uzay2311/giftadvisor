@@ -14,6 +14,10 @@ from typing import Optional
 import os
 import json
 import logging
+import re
+import time
+import hashlib
+import sqlite3
 
 logger = logging.getLogger("gift_advisor")
 
@@ -24,6 +28,9 @@ try:
     PRODUCTS_PER_SEARCH = max(10, min(int(os.getenv("PRODUCTS_PER_SEARCH", "20")), 30))
 except Exception:
     PRODUCTS_PER_SEARCH = 20
+
+ABUSE_DB_PATH = os.path.join(os.path.dirname(__file__), "logs", "abuse_flags.sqlite3")
+GENERIC_ABUSE_REPLY = "I can help with gift suggestions, but I cannot process this request right now. Please try again with a normal, concise gift-related question."
 
 # Prefer Responses API if available; fallback to Chat Completions
 def _call_llm(messages: list, stream: bool = False):
@@ -68,7 +75,7 @@ You are NOT a general chat companion. You focus exclusively on gift-giving advic
 Core behaviors:
 - FIRST gather information: occasion, budget, recipient's interests. Do NOT search until you have enough context.
 - Ask about the occasion (birthday, anniversary, wedding, holiday, graduation, etc.)
-- Learn about the recipient: age range, interests, relationship to giver, personality
+- Learn about the recipient: age or age range, interests, relationship to giver, personality
 - Understand budget constraints and preferences
 - Only after you have occasion + budget + (interests or product), suggest products
 - Keep responses concise and actionable (2-4 sentences typically)
@@ -128,6 +135,8 @@ RULES (VERY IMPORTANT):
 9. Only return search_strategy (and trigger a search) when you have occasion + budget + (interests or product). Until then, ask for what's missing and return null. Do NOT search and ask in the same turn.
 10. When the user has provided enough (occasion, budget, interests/product), return search_strategy with queries. Do NOT return null when you have enough context.
 11. Treat values already present in gift_context (including UI-selected occasion/budget) as known facts; do not ask for them again.
+12. Mention on-screen occasion/budget options ONLY when either occasion or budget is still missing. If occasion and budget are already known in gift_context, do NOT mention on-screen options.
+13. Ask for recipient age (or age range) as part of exploration. If the recipient is a child/teen (e.g., son, daughter, kid, teenager, 13-17), collect age before any product search.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -161,6 +170,162 @@ Rules:
   "reply": "string"
 }
 """.strip()
+
+
+def _abuse_db_connect():
+    os.makedirs(os.path.dirname(ABUSE_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(ABUSE_DB_PATH, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def _init_abuse_db():
+    try:
+        with _abuse_db_connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS device_abuse (
+                    device_id TEXT PRIMARY KEY,
+                    system_abuser_flag INTEGER NOT NULL DEFAULT 0,
+                    abuse_score INTEGER NOT NULL DEFAULT 0,
+                    window_start INTEGER NOT NULL DEFAULT 0,
+                    req_count INTEGER NOT NULL DEFAULT 0,
+                    last_seen INTEGER NOT NULL DEFAULT 0,
+                    last_msg_hash TEXT,
+                    repeat_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_device_abuse_flag ON device_abuse(system_abuser_flag)"
+            )
+    except Exception as e:
+        logger.warning("Failed to initialize abuse DB: %s", e)
+
+
+def _normalize_device_id(raw_device_id: Optional[str]) -> str:
+    rid = str(raw_device_id or "").strip().lower()
+    if rid and re.fullmatch(r"[a-z0-9._-]{8,128}", rid):
+        return rid
+    fallback_src = (
+        (request.headers.get("X-Forwarded-For") or request.remote_addr or "unknown")
+        + "|"
+        + (request.headers.get("User-Agent") or "ua")
+    )
+    return "anon-" + hashlib.sha256(fallback_src.encode("utf-8")).hexdigest()[:24]
+
+
+def _score_message_risk(message: str) -> int:
+    m = str(message or "").strip()
+    if not m:
+        return 0
+    score = 0
+    if len(m) > 1200:
+        score += 3
+    elif len(m) > 700:
+        score += 2
+    if re.search(r"(https?://|www\.)", m, re.I):
+        score += 2
+    if re.search(r"(buy now|cheap followers|click here|free money|casino|crypto giveaway)", m, re.I):
+        score += 3
+    if re.search(r"(.)\1{9,}", m):
+        score += 2
+    if m.count("\n") > 20:
+        score += 1
+    return score
+
+
+def _check_and_update_abuse(device_id: str, message: str) -> int:
+    now = int(time.time())
+    msg_hash = hashlib.sha256(str(message or "").strip().lower().encode("utf-8")).hexdigest()
+    try:
+        with _abuse_db_connect() as conn:
+            row = conn.execute(
+                """
+                SELECT system_abuser_flag, abuse_score, window_start, req_count, last_msg_hash, repeat_count
+                FROM device_abuse WHERE device_id=?
+                """,
+                (device_id,),
+            ).fetchone()
+
+            if row is None:
+                system_abuser_flag = 0
+                abuse_score = 0
+                window_start = now
+                req_count = 0
+                last_msg_hash = None
+                repeat_count = 0
+            else:
+                (
+                    system_abuser_flag,
+                    abuse_score,
+                    window_start,
+                    req_count,
+                    last_msg_hash,
+                    repeat_count,
+                ) = row
+
+            if system_abuser_flag == 1:
+                conn.execute(
+                    "UPDATE device_abuse SET last_seen=?, updated_at=? WHERE device_id=?",
+                    (now, now, device_id),
+                )
+                return 1
+
+            if now - int(window_start or 0) > 60:
+                window_start = now
+                req_count = 0
+
+            req_count = int(req_count or 0) + 1
+            risk_score = _score_message_risk(message)
+
+            if last_msg_hash and msg_hash == last_msg_hash:
+                repeat_count = int(repeat_count or 0) + 1
+            else:
+                repeat_count = 1
+
+            if req_count >= 25:
+                risk_score += 3
+            if repeat_count >= 6:
+                risk_score += 3
+
+            # Soft decay to avoid permanent escalation on occasional bursts.
+            abuse_score = max(0, int(abuse_score or 0) - 1) + risk_score
+            system_abuser_flag = 1 if abuse_score >= 12 else 0
+
+            conn.execute(
+                """
+                INSERT INTO device_abuse
+                (device_id, system_abuser_flag, abuse_score, window_start, req_count, last_seen, last_msg_hash, repeat_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    system_abuser_flag=excluded.system_abuser_flag,
+                    abuse_score=excluded.abuse_score,
+                    window_start=excluded.window_start,
+                    req_count=excluded.req_count,
+                    last_seen=excluded.last_seen,
+                    last_msg_hash=excluded.last_msg_hash,
+                    repeat_count=excluded.repeat_count,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    device_id,
+                    int(system_abuser_flag),
+                    int(abuse_score),
+                    int(window_start),
+                    int(req_count),
+                    now,
+                    msg_hash,
+                    int(repeat_count),
+                    now,
+                ),
+            )
+            return int(system_abuser_flag)
+    except Exception as e:
+        logger.warning("Abuse check failed, allowing request: %s", e)
+        return 0
 
 
 
@@ -633,33 +798,61 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
     if not text:
         return text
 
+    has_budget = gift_context.get("budget_min") is not None or gift_context.get("budget_max") is not None
+
     # If occasion is already known, strip only the occasion-ask fragments.
     if gift_context.get("occasion"):
         patterns = [
             r"(?i)\b(?:could\s+you(?:\s+please)?|can\s+you|please)\s+(?:tell|share)(?:\s+me)?(?:\s+what(?:'s|\s+is))?\s+(?:the\s+)?occasion[^?.!]*[?.!]?",
             r"(?i)\bwhat(?:'s|\s+is)\s+(?:the\s+)?occasion[^?.!]*[?.!]?",
-            r"(?i)\bis\s+it\s+(?:for\s+)?(?:a\s+)?(?:birthday|anniversary|wedding|holiday|graduation|baby\s*shower|housewarming|thank\s*you)[^?.!]*[?.!]?",
+            r"(?i)\bis\s+it[\s,]*(?:for\s+)?(?:a\s+)?(?:birthday|anniversary|wedding|holiday|graduation|baby\s*shower|housewarming|thank\s*you)[^?.!]*[?.!]?",
             r"(?i)\b(?:for\s+)?(?:her|your\s+wife'?s?)\s+(?:birthday|anniversary|wedding|holiday|graduation|baby\s*shower|housewarming|thank\s*you)\??",
             r"(?i)\b(?:occasion\s+for\s+the\s+gift)\b",
         ]
         for pat in patterns:
             text = re.sub(pat, " ", text)
 
-        # Cleanup connective artifacts after fragment removal.
-        text = re.sub(r"(?i)\b(and|also)\s*(?:,)?\s*(and|also)\b", r"\1", text)
-        text = re.sub(r"\s*,\s*", ", ", text)
-        text = re.sub(r"\s{2,}", " ", text).strip(" ,;.-")
+    # If budget is already known, strip budget-ask fragments.
+    if has_budget:
+        budget_patterns = [
+            r"(?i)\b(?:also\s*,?\s*)?what(?:'s|\s+is)\s+(?:your\s+)?budget(?:\s+range)?[^?.!]*[?.!]?",
+            r"(?i)\bdo\s+you\s+have\s+(?:a\s+)?budget(?:\s+range)?[^?.!]*[?.!]?",
+            r"(?i)\bcould\s+you(?:\s+please)?\s+(?:share|tell)\s+(?:me\s+)?(?:your\s+)?budget(?:\s+range)?[^?.!]*[?.!]?",
+            r"(?i)\bplease\s+(?:share|tell)\s+(?:me\s+)?(?:your\s+)?budget(?:\s+range)?[^?.!]*[?.!]?",
+            r"(?i)\bif\s+you\s+have\s+(?:a\s+)?specific\s+budget(?:\s+in\s+mind)?[^?.!]*[?.!]?",
+            r"(?i)\bfeel\s+free\s+to\s+share\s+(?:that\s+as\s+well|your\s+budget(?:\s+range)?)\b[^?.!]*[?.!]?",
+            r"(?i)\b(?:let\s+me\s+know|share|tell\s+me)\s+(?:if\s+you\s+have\s+)?(?:a\s+)?budget(?:\s+range)?\b[^?.!]*[?.!]?",
+        ]
+        for pat in budget_patterns:
+            text = re.sub(pat, " ", text)
+        # Catch-all: remove any remaining short sentence that asks about budget.
+        text = re.sub(r"(?i)(?:^|[.!?]\s+)[^.!?]{0,140}\bbudget\b[^.!?]*[.!?]?", " ", text)
 
-        # Guard against awkward tiny remnants like "Great!"
-        if len(text) < 12:
-            has_budget = gift_context.get("budget_min") is not None or gift_context.get("budget_max") is not None
-            has_interests = bool(gift_context.get("interests"))
-            if not has_budget and not has_interests:
-                text = "Great! Could you share your budget and her interests?"
-            elif not has_budget:
-                text = "Great! Could you share your budget range?"
-            elif not has_interests:
-                text = "Great! Could you share her interests or hobbies?"
+    # Remove generic UI-option boilerplate that can appear by itself.
+    text = re.sub(
+        r"(?i)(?:^|[.!?]\s+)you\s+can\s+also\s+tap\s+the\s+on-?screen\s+options[^.!?]*[.!?]?",
+        " ",
+        text,
+    )
+
+    # Cleanup connective artifacts after fragment removal.
+    text = re.sub(r"(?i)\b(and|also)\s*(?:,)?\s*(and|also)\b", r"\1", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = re.sub(r"\s{2,}", " ", text).strip(" ,;.-")
+
+    # Guard against awkward tiny remnants like "Great!"
+    if len(text) < 12:
+        has_interests = bool(gift_context.get("interests"))
+        has_product = bool(str(gift_context.get("product") or "").strip())
+        has_recipient = bool(str(gift_context.get("recipient") or "").strip())
+        if not has_recipient:
+            text = "Great! Who is the gift for?"
+        elif not has_interests and not has_product:
+            text = "Great! What is she into these days (hobbies, style, or favorite things)?"
+        elif not has_budget:
+            text = "Great! What budget range should I target?"
+        else:
+            text = "Great! Any specific style, brand, or type of gift you want to prioritize?"
 
     return _compact_ui_text(text)
 
@@ -849,6 +1042,8 @@ def _resolve_search_queries(
     return _apply_budget_to_query_subtitles(query_subtitles, effective_ctx)
 
 
+_init_abuse_db()
+
 
 def gift_advisor_chat():
     """POST /gift_advisor - Chat endpoint for gift recommendations."""
@@ -860,21 +1055,58 @@ def gift_advisor_chat():
         message = (data.get("message") or "").strip()
         if not message:
             return jsonify({"error": "Missing message"}), 400
+        device_id = _normalize_device_id(data.get("device_id"))
+        system_abuser_flag = _check_and_update_abuse(device_id, message)
 
         occasion = (data.get("occasion") or "").strip()
+        budget_min = data.get("budget_min")
+        budget_max = data.get("budget_max")
         history = _normalize_history(data.get("history") or [])
         gift_context = data.get("gift_context")
         previous_queries = data.get("previous_queries")
         previous_products_by_query = _normalize_products_by_query(data.get("previous_products_by_query"))
         if not isinstance(gift_context, dict):
             gift_context = None
-        # Promote selected occasion chip into effective context so the LLM won't ask again.
-        occasion_ctx = {"occasion": occasion} if occasion else {}
-        effective_input_context = merge_search_state(gift_context, occasion_ctx)
+        # Promote selected occasion/budget chips into effective context so the LLM won't ask again.
+        ui_ctx = {}
+        if occasion:
+            ui_ctx["occasion"] = occasion
+        try:
+            if budget_min is not None and str(budget_min).strip() != "":
+                ui_ctx["budget_min"] = int(float(budget_min))
+            if budget_max is not None and str(budget_max).strip() != "":
+                ui_ctx["budget_max"] = int(float(budget_max))
+        except Exception:
+            pass
+        effective_input_context = merge_search_state(gift_context, ui_ctx)
 
         accept = (request.headers.get("Accept") or "").lower()
         wants_sse = "text/event-stream" in accept
         wants_stream = bool(data.get("stream")) or wants_sse
+
+        if system_abuser_flag == 1:
+            payload = {
+                "reply": GENERIC_ABUSE_REPLY,
+                "gift_context": gift_context or {},
+                "system_abuser_flag": 1,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            if not wants_stream:
+                return jsonify(payload)
+
+            @stream_with_context
+            def blocked_gen():
+                yield _sse("meta", {"ok": True, "stream": True, "ts": datetime.now(timezone.utc).isoformat()})
+                yield _sse("final", payload)
+                yield _sse("done", {"ok": True})
+
+            headers = {
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+            return Response(blocked_gen(), headers=headers)
 
         context_bits = []
         if occasion:
@@ -925,6 +1157,7 @@ def gift_advisor_chat():
             payload = {
                 "reply": reply,
                 "gift_context": merged_out_context,
+                "system_abuser_flag": int(system_abuser_flag),
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
             if products_by_query:

@@ -16,10 +16,87 @@
   const budgetChipsEl = app.querySelector('[data-ga-budget-chips]');
 
   const ENDPOINT = '/gift_advisor';
+  const DEVICE_ID_KEY = 'giftadvisor_device_id_v1';
+  const OCCASION_KEY = 'giftadvisor_selected_occasion_v1';
+  const BUDGET_KEY = 'giftadvisor_selected_budget_v1';
 
   let selectedOccasion = '';
   let selectedBudget = { min: null, max: null };
   let messages = [];
+
+  function createLocalDeviceId() {
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+      }
+    } catch (_) {}
+    const rand = Math.random().toString(36).slice(2, 12);
+    return 'dev-' + Date.now().toString(36) + '-' + rand;
+  }
+
+  function getOrCreateDeviceId() {
+    try {
+      const existing = localStorage.getItem(DEVICE_ID_KEY);
+      if (existing && /^[a-z0-9._-]{8,128}$/i.test(existing)) return existing.toLowerCase();
+      const created = createLocalDeviceId().toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 128);
+      localStorage.setItem(DEVICE_ID_KEY, created);
+      return created;
+    } catch (_) {
+      return createLocalDeviceId().toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 128);
+    }
+  }
+
+  const deviceId = getOrCreateDeviceId();
+
+  function loadPersistedSelections() {
+    try {
+      const occ = (localStorage.getItem(OCCASION_KEY) || '').trim();
+      if (occ) selectedOccasion = occ;
+      const budgetRaw = localStorage.getItem(BUDGET_KEY);
+      if (budgetRaw) {
+        const b = JSON.parse(budgetRaw);
+        selectedBudget = {
+          min: Number.isFinite(Number(b?.min)) ? Number(b.min) : null,
+          max: Number.isFinite(Number(b?.max)) ? Number(b.max) : null,
+        };
+      }
+    } catch (_) {}
+  }
+
+  function persistSelections() {
+    try {
+      if (selectedOccasion) localStorage.setItem(OCCASION_KEY, selectedOccasion);
+      else localStorage.removeItem(OCCASION_KEY);
+      localStorage.setItem(BUDGET_KEY, JSON.stringify(selectedBudget || {}));
+    } catch (_) {}
+  }
+
+  function hydrateChipSelections() {
+    if (chipsEl && selectedOccasion) {
+      const btn = chipsEl.querySelector(`[data-occasion="${selectedOccasion}"]`);
+      if (btn) {
+        chipsEl.querySelectorAll('.ga-chip').forEach((c) => c.classList.remove('is-active'));
+        btn.classList.add('is-active');
+      }
+    }
+    if (budgetChipsEl) {
+      let matched = null;
+      const targetMin = Number.isFinite(selectedBudget.min) ? selectedBudget.min : null;
+      const targetMax = Number.isFinite(selectedBudget.max) ? selectedBudget.max : null;
+      budgetChipsEl.querySelectorAll('.ga-chip').forEach((btn) => {
+        const bmin = Number.parseInt(btn.dataset.budgetMin || '', 10);
+        const bmax = Number.parseInt(btn.dataset.budgetMax || '', 10);
+        const min = Number.isFinite(bmin) ? bmin : null;
+        const max = Number.isFinite(bmax) ? bmax : null;
+        const same = min === targetMin && max === targetMax;
+        if (same) matched = btn;
+        btn.classList.remove('is-active');
+      });
+      if (matched) matched.classList.add('is-active');
+    }
+  }
+
+  loadPersistedSelections();
 
   /* Occasion selection */
   if (chipsEl) {
@@ -29,6 +106,7 @@
       chipsEl.querySelectorAll('.ga-chip').forEach((c) => c.classList.remove('is-active'));
       btn.classList.add('is-active');
       selectedOccasion = btn.dataset.occasion || '';
+      persistSelections();
     });
   }
 
@@ -47,8 +125,11 @@
         min: Number.isFinite(min) ? min : null,
         max: Number.isFinite(max) ? max : null,
       };
+      persistSelections();
     });
   }
+
+  hydrateChipSelections();
 
   /* Auto-resize textarea */
   if (inputEl) {
@@ -329,6 +410,9 @@
       message: msg,
       history,
       occasion: selectedOccasion,
+      budget_min: Number.isFinite(selectedBudget.min) ? selectedBudget.min : undefined,
+      budget_max: Number.isFinite(selectedBudget.max) ? selectedBudget.max : undefined,
+      device_id: deviceId,
       gift_context: Object.keys(gift_context).length > 0 ? gift_context : undefined,
       previous_queries: previous_queries.length > 0 ? previous_queries : undefined,
       previous_products_by_query: previous_products_by_query.length > 0 ? previous_products_by_query : undefined,
@@ -390,6 +474,9 @@
           if (typeof onProductsLoading === 'function') onProductsLoading(obj);
         } else if (event === 'final' && obj && typeof obj === 'object') {
           onFinal(obj);
+        } else if (event === 'error') {
+          const msg = (obj && (obj.error || obj.message)) || 'Server error';
+          throw new Error(String(msg));
         }
       }
     }
