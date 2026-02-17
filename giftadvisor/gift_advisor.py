@@ -18,6 +18,7 @@ import re
 import time
 import hashlib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger("gift_advisor")
 
@@ -269,6 +270,8 @@ RULES (VERY IMPORTANT):
 11. Treat values already present in gift_context (including UI-selected occasion/budget) as known facts; do not ask for them again.
 12. Mention on-screen occasion/budget options ONLY when either occasion or budget is still missing. If occasion and budget are already known in gift_context, do NOT mention on-screen options.
 13. Ask for recipient age (or age range) as part of exploration. If the recipient is a child/teen (e.g., son, daughter, kid, teenager, 13-17), collect age before any product search.
+14. If user asks for "more options", "other ideas", "something different", or is unhappy with current picks, keep ALL hard constraints but generate NEW creative query angles. Do not repeat prior queries from previous_search_queries/people_profiles context unless no alternatives exist.
+15. For "more options" requests with enough context, prefer search_strategy.mode="explore" with 3 diverse, non-overlapping query intents (e.g., accessories vs premium core product vs experiential gift) while preserving recipient, age fit, occasion, and budget.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -657,13 +660,11 @@ def _rank_products_by_sections(
 
     multi_query = len(ordered_queries) > 1
     top_k = 3 if multi_query else 5
-    sections = []
     global_candidates = _flatten_product_candidates(raw_results, max_candidates=1000)
-
+    tasks = []
     for idx, q in enumerate(ordered_queries, start=1):
         row = next((r for r in raw_results if str(r.get("query") or "").strip() == q), None)
         row_candidates = _flatten_product_candidates([row], max_candidates=1000) if isinstance(row, dict) else []
-
         # Rank with full pool visibility, but keep section intent via query_hints.
         # Start with row-specific candidates and append remaining global ones.
         candidates = []
@@ -676,9 +677,11 @@ def _rank_products_by_sections(
                 continue
             seen.add(key)
             candidates.append(c)
+        tasks.append((idx, q, row_candidates, candidates))
 
+    def _rank_section_task(idx, q, row_candidates, candidates):
         if not candidates:
-            continue
+            return (idx, None)
         ranked = _rank_products_with_llm(
             candidates=candidates,
             message=message,
@@ -687,7 +690,6 @@ def _rank_products_by_sections(
             query_subtitles=[(q, subtitle_by_query.get(q, ""))],
             top_k=top_k,
         )
-
         # Enforce strict section integrity: keep only products that belong to this query bucket.
         row_keys = set()
         for rc in row_candidates:
@@ -712,7 +714,6 @@ def _rank_products_by_sections(
             strict_ranked.append(p)
             if len(strict_ranked) >= top_k:
                 break
-
         # Refill from the same query bucket if ranker picked out-of-bucket items.
         if len(strict_ranked) < top_k:
             for rc in row_candidates:
@@ -726,16 +727,30 @@ def _rank_products_by_sections(
                 strict_ranked.append(p)
                 if len(strict_ranked) >= top_k:
                     break
-
         if not strict_ranked:
-            continue
-        sections.append({
-            "query": f"category_{idx}",
-            "subtitle": _friendly_section_title(q, subtitle_by_query.get(q, ""), idx),
-            "products": strict_ranked[:top_k],
-        })
+            return (idx, None)
+        return (
+            idx,
+            {
+                "query": f"category_{idx}",
+                "subtitle": _friendly_section_title(q, subtitle_by_query.get(q, ""), idx),
+                "products": strict_ranked[:top_k],
+            },
+        )
 
-    return sections
+    sections_by_idx = {}
+    max_workers = min(4, max(1, len(tasks)))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_rank_section_task, idx, q, row_candidates, candidates): idx
+            for idx, q, row_candidates, candidates in tasks
+        }
+        for fut in as_completed(futures):
+            idx, section = fut.result()
+            if section:
+                sections_by_idx[idx] = section
+
+    return [sections_by_idx[i] for i in sorted(sections_by_idx.keys())]
 
 
 def _safe_json_loads(s: str):
