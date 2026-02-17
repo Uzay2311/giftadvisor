@@ -67,6 +67,138 @@ def merge_search_state(old: Optional[dict], new: dict) -> dict:
     return merged
 
 
+def _recipient_gender_from_message(message: str) -> tuple[Optional[str], Optional[str]]:
+    m = str(message or "").strip().lower()
+    if not m:
+        return (None, None)
+    mapping = [
+        (("wife", "girlfriend", "mom", "mother", "sister", "daughter"), "women"),
+        (("husband", "boyfriend", "dad", "father", "brother", "son"), "men"),
+    ]
+    for words, gender in mapping:
+        for w in words:
+            if re.search(rf"\b{re.escape(w)}\b", m):
+                return (w, gender)
+    return (None, None)
+
+
+def _normalize_people_profiles(raw_profiles) -> dict:
+    out = {"active_profile_id": None, "profiles": []}
+    if not isinstance(raw_profiles, dict):
+        return out
+    profiles = raw_profiles.get("profiles")
+    active_id = str(raw_profiles.get("active_profile_id") or "").strip()
+    if not isinstance(profiles, list):
+        return out
+    seen = set()
+    for p in profiles[:20]:
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("id") or "").strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        ctx = p.get("context") if isinstance(p.get("context"), dict) else {}
+        label = str(p.get("label") or "").strip()
+        if not label:
+            label = str(ctx.get("recipient") or pid).strip()
+        out["profiles"].append({"id": pid, "label": label, "context": ctx})
+    if out["profiles"]:
+        ids = {p["id"] for p in out["profiles"]}
+        out["active_profile_id"] = active_id if active_id in ids else out["profiles"][0]["id"]
+    return out
+
+
+def _next_profile_id(people_profiles: dict) -> str:
+    ids = {str(p.get("id")) for p in people_profiles.get("profiles") or [] if isinstance(p, dict)}
+    n = 1
+    while True:
+        pid = f"p{n}"
+        if pid not in ids:
+            return pid
+        n += 1
+
+
+def _build_effective_input_context(
+    people_profiles: dict,
+    active_profile_id: Optional[str],
+    gift_context: Optional[dict],
+    message: str,
+    occasion: str,
+    budget_min,
+    budget_max,
+) -> tuple[dict, str, dict]:
+    store = _normalize_people_profiles(people_profiles)
+    profiles = store["profiles"]
+    msg_recipient, msg_gender = _recipient_gender_from_message(message)
+
+    chosen_idx = None
+    if msg_recipient:
+        for i, p in enumerate(profiles):
+            pr = str(((p.get("context") or {}).get("recipient") or "")).strip().lower()
+            if pr and pr == msg_recipient:
+                chosen_idx = i
+                break
+        if chosen_idx is None:
+            pid = _next_profile_id(store)
+            new_ctx = {"recipient": msg_recipient}
+            if msg_gender:
+                new_ctx["gender"] = msg_gender
+            profiles.append({"id": pid, "label": msg_recipient, "context": new_ctx})
+            chosen_idx = len(profiles) - 1
+    else:
+        current = str(active_profile_id or store.get("active_profile_id") or "").strip()
+        if current:
+            for i, p in enumerate(profiles):
+                if str(p.get("id") or "") == current:
+                    chosen_idx = i
+                    break
+        if chosen_idx is None and profiles:
+            chosen_idx = 0
+        if chosen_idx is None:
+            pid = _next_profile_id(store)
+            profiles.append({"id": pid, "label": "gift profile", "context": {}})
+            chosen_idx = 0
+
+    profile = profiles[chosen_idx]
+    selected_id = str(profile.get("id") or _next_profile_id(store))
+    base = profile.get("context") if isinstance(profile.get("context"), dict) else {}
+    base = merge_search_state(base, gift_context if isinstance(gift_context, dict) else {})
+
+    ui_ctx = {}
+    if occasion:
+        ui_ctx["occasion"] = occasion
+    try:
+        if budget_min is not None and str(budget_min).strip() != "":
+            ui_ctx["budget_min"] = int(float(budget_min))
+        if budget_max is not None and str(budget_max).strip() != "":
+            ui_ctx["budget_max"] = int(float(budget_max))
+    except Exception:
+        pass
+    if msg_recipient:
+        ui_ctx["recipient"] = msg_recipient
+    if msg_gender:
+        ui_ctx["gender"] = msg_gender
+
+    effective = merge_search_state(base, ui_ctx)
+    profile["context"] = effective
+    profile["label"] = str(effective.get("recipient") or profile.get("label") or selected_id)
+    store["active_profile_id"] = selected_id
+    return effective, selected_id, store
+
+
+def _update_active_profile_context(people_profiles: dict, active_profile_id: str, context: dict) -> dict:
+    store = _normalize_people_profiles(people_profiles)
+    if not active_profile_id:
+        return store
+    for p in store["profiles"]:
+        if str(p.get("id") or "") == str(active_profile_id):
+            p["context"] = merge_search_state(p.get("context") if isinstance(p.get("context"), dict) else {}, context or {})
+            p["label"] = str((p["context"].get("recipient") or p.get("label") or active_profile_id))
+            break
+    return store
+
+
 GIFT_ADVISOR_SYSTEM_PROMPT = """
 You are a warm, knowledgeable Gift Advisor—like a gift expert in a boutique. Your goal is to help people find the perfect gift.
 
@@ -805,6 +937,7 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
         patterns = [
             r"(?i)\b(?:could\s+you(?:\s+please)?|can\s+you|please)\s+(?:tell|share)(?:\s+me)?(?:\s+what(?:'s|\s+is))?\s+(?:the\s+)?occasion[^?.!]*[?.!]?",
             r"(?i)\bwhat(?:'s|\s+is)\s+(?:the\s+)?occasion[^?.!]*[?.!]?",
+            r"(?i)\bwhat\s+occasion\s+are\s+you\s+shopping\s+for[^?.!]*[?.!]?",
             r"(?i)\bis\s+it[\s,]*(?:for\s+)?(?:a\s+)?(?:birthday|anniversary|wedding|holiday|graduation|baby\s*shower|housewarming|thank\s*you)[^?.!]*[?.!]?",
             r"(?i)\b(?:for\s+)?(?:her|your\s+wife'?s?)\s+(?:birthday|anniversary|wedding|holiday|graduation|baby\s*shower|housewarming|thank\s*you)\??",
             r"(?i)\b(?:occasion\s+for\s+the\s+gift)\b",
@@ -839,9 +972,10 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
     text = re.sub(r"(?i)\b(and|also)\s*(?:,)?\s*(and|also)\b", r"\1", text)
     text = re.sub(r"\s*,\s*", ", ", text)
     text = re.sub(r"\s{2,}", " ", text).strip(" ,;.-")
+    text = re.sub(r"(?i)\b(?:and|also)\s*$", "", text).strip(" ,;.-")
 
     # Guard against awkward tiny remnants like "Great!"
-    if len(text) < 12:
+    if len(text) < 12 or text.lower() in ("this will help me suggest the best options for you", "this will help me tailor the suggestions even more"):
         has_interests = bool(gift_context.get("interests"))
         has_product = bool(str(gift_context.get("product") or "").strip())
         has_recipient = bool(str(gift_context.get("recipient") or "").strip())
@@ -1063,22 +1197,22 @@ def gift_advisor_chat():
         budget_max = data.get("budget_max")
         history = _normalize_history(data.get("history") or [])
         gift_context = data.get("gift_context")
+        people_profiles = _normalize_people_profiles(data.get("people_profiles"))
+        active_profile_id = str(data.get("active_profile_id") or "").strip()
         previous_queries = data.get("previous_queries")
         previous_products_by_query = _normalize_products_by_query(data.get("previous_products_by_query"))
         if not isinstance(gift_context, dict):
             gift_context = None
-        # Promote selected occasion/budget chips into effective context so the LLM won't ask again.
-        ui_ctx = {}
-        if occasion:
-            ui_ctx["occasion"] = occasion
-        try:
-            if budget_min is not None and str(budget_min).strip() != "":
-                ui_ctx["budget_min"] = int(float(budget_min))
-            if budget_max is not None and str(budget_max).strip() != "":
-                ui_ctx["budget_max"] = int(float(budget_max))
-        except Exception:
-            pass
-        effective_input_context = merge_search_state(gift_context, ui_ctx)
+        # Resolve active person profile and context for this turn.
+        effective_input_context, active_profile_id, people_profiles = _build_effective_input_context(
+            people_profiles=people_profiles,
+            active_profile_id=active_profile_id,
+            gift_context=gift_context,
+            message=message,
+            occasion=occasion,
+            budget_min=budget_min,
+            budget_max=budget_max,
+        )
 
         accept = (request.headers.get("Accept") or "").lower()
         wants_sse = "text/event-stream" in accept
@@ -1111,8 +1245,25 @@ def gift_advisor_chat():
         context_bits = []
         if occasion:
             context_bits.append(f"occasion={occasion}")
+        if active_profile_id:
+            context_bits.append(f"active_profile_id={active_profile_id}")
         if effective_input_context:
             context_bits.append(f"gift_context={json.dumps(effective_input_context, ensure_ascii=False)}")
+        if people_profiles.get("profiles"):
+            profile_summary = []
+            for p in people_profiles.get("profiles", [])[:8]:
+                ctx = p.get("context") if isinstance(p.get("context"), dict) else {}
+                profile_summary.append(
+                    {
+                        "id": p.get("id"),
+                        "recipient": ctx.get("recipient"),
+                        "occasion": ctx.get("occasion"),
+                        "budget_min": ctx.get("budget_min"),
+                        "budget_max": ctx.get("budget_max"),
+                        "interests": ctx.get("interests"),
+                    }
+                )
+            context_bits.append(f"people_profiles={json.dumps(profile_summary, ensure_ascii=False)}")
         if previous_products_by_query:
             prev_q = [r.get("query") for r in previous_products_by_query if r.get("query")]
             context_bits.append(f"previous_search_queries={json.dumps(prev_q, ensure_ascii=False)}")
@@ -1154,9 +1305,12 @@ def gift_advisor_chat():
             reply = _strip_search_queries_from_reply(_compact_ui_text(reply))
             merged_out_context = merge_search_state(effective_input_context, out_gift_context or {})
             reply = _avoid_reasking_known_fields(reply, merged_out_context)
+            updated_profiles = _update_active_profile_context(people_profiles, active_profile_id, merged_out_context)
             payload = {
                 "reply": reply,
                 "gift_context": merged_out_context,
+                "people_profiles": updated_profiles,
+                "active_profile_id": active_profile_id,
                 "system_abuser_flag": int(system_abuser_flag),
                 "ts": datetime.now(timezone.utc).isoformat(),
             }

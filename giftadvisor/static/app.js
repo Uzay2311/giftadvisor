@@ -23,6 +23,8 @@
   let selectedOccasion = '';
   let selectedBudget = { min: null, max: null };
   let messages = [];
+  let activeProfileId = '';
+  let peopleProfiles = null;
 
   function createLocalDeviceId() {
     try {
@@ -367,21 +369,33 @@
   function getAccumulatedContext() {
     const assistants = messages.filter((m) => m.role === 'assistant');
     let giftContext = {};
-    const previousProductsMap = new Map();
+    let latestActiveProfileId = activeProfileId || '';
+    let latestPeopleProfiles = peopleProfiles;
+    const previousProductsByProfile = new Map();
     for (const a of assistants) {
-      if (a.gift_context && typeof a.gift_context === 'object') {
+      if (a.people_profiles && typeof a.people_profiles === 'object') {
+        latestPeopleProfiles = a.people_profiles;
+      }
+      if (a.active_profile_id && typeof a.active_profile_id === 'string') {
+        latestActiveProfileId = a.active_profile_id;
+      }
+      if (!latestPeopleProfiles && a.gift_context && typeof a.gift_context === 'object') {
         giftContext = { ...giftContext, ...a.gift_context };
       }
       if (a.products_by_query && Array.isArray(a.products_by_query)) {
-        for (const row of a.products_by_query) {
-          if (!row || !row.query || !Array.isArray(row.products) || row.products.length === 0) continue;
-          const key = String(row.query).trim().toLowerCase();
-          if (!key) continue;
-          previousProductsMap.set(key, row);
-        }
+        const pid = String(a.active_profile_id || '').trim();
+        if (!pid) continue;
+        previousProductsByProfile.set(pid, a.products_by_query);
       }
     }
-    const previousProductsByQuery = Array.from(previousProductsMap.values());
+    if (latestPeopleProfiles && latestActiveProfileId) {
+      const profiles = Array.isArray(latestPeopleProfiles.profiles) ? latestPeopleProfiles.profiles : [];
+      const active = profiles.find((p) => p && p.id === latestActiveProfileId);
+      if (active && active.context && typeof active.context === 'object') {
+        giftContext = { ...active.context };
+      }
+    }
+    const previousProductsByQuery = previousProductsByProfile.get(latestActiveProfileId) || [];
     const previousQueries = previousProductsByQuery.map((p) => p.query).filter(Boolean);
     if (selectedOccasion) {
       giftContext.occasion = selectedOccasion;
@@ -396,6 +410,8 @@
       gift_context: giftContext,
       previous_queries: previousQueries,
       previous_products_by_query: previousProductsByQuery,
+      people_profiles: latestPeopleProfiles || undefined,
+      active_profile_id: latestActiveProfileId || undefined,
     };
   }
 
@@ -405,7 +421,7 @@
       .map((m) => ({ role: m.role, content: m.content }))
       .slice(-16);
 
-    const { gift_context, previous_queries, previous_products_by_query } = getAccumulatedContext();
+    const { gift_context, previous_queries, previous_products_by_query, people_profiles, active_profile_id } = getAccumulatedContext();
     const payload = {
       message: msg,
       history,
@@ -414,6 +430,8 @@
       budget_max: Number.isFinite(selectedBudget.max) ? selectedBudget.max : undefined,
       device_id: deviceId,
       gift_context: Object.keys(gift_context).length > 0 ? gift_context : undefined,
+      people_profiles,
+      active_profile_id,
       previous_queries: previous_queries.length > 0 ? previous_queries : undefined,
       previous_products_by_query: previous_products_by_query.length > 0 ? previous_products_by_query : undefined,
       stream: true,
@@ -571,7 +589,13 @@
             content: reply,
             products_by_query: productsByQuery,
             gift_context: finalPayload.gift_context,
+            people_profiles: finalPayload.people_profiles,
+            active_profile_id: finalPayload.active_profile_id,
           });
+          if (finalPayload.active_profile_id) activeProfileId = finalPayload.active_profile_id;
+          if (finalPayload.people_profiles && typeof finalPayload.people_profiles === 'object') {
+            peopleProfiles = finalPayload.people_profiles;
+          }
           scheduleAutoScroll();
         },
         (loadingPayload) => {
