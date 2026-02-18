@@ -590,24 +590,64 @@ body {
 }
 
 @media (max-width: 768px) {
+  .ga-header {
+    padding: 0.85rem 0.75rem 0.5rem;
+  }
+
+  .ga-logo {
+    font-size: 1.45rem;
+  }
+
+  .ga-tagline {
+    margin-top: 0.1rem;
+    font-size: 0.8rem;
+  }
+
   .ga-main {
-    padding: 0.25rem;
+    padding: 0.2rem;
   }
 
   .ga-chat {
     max-width: none;
-    min-height: 58vh;
+    min-height: calc(100dvh - 132px);
   }
 
   .ga-chat__center {
-    padding: 0.75rem 0.5rem 0;
+    padding: 0.55rem 0.5rem 0;
+    gap: 0.55rem;
+  }
+
+  .ga-occasion {
+    margin-bottom: 0.25rem;
+  }
+
+  .ga-occasion__label {
+    margin-bottom: 0.45rem;
+    font-size: 0.82rem;
+  }
+
+  .ga-occasion__label--sub {
+    margin-top: 0.6rem;
+  }
+
+  .ga-occasion__chips {
+    gap: 0.4rem;
+  }
+
+  .ga-chip {
+    padding: 0.42rem 0.78rem;
+    font-size: 0.84rem;
   }
 
   .ga-messages {
     min-height: 56px;
   }
 
+  .ga-messages.ga-messages--intro .ga-msg {
+    margin-bottom: 0.25rem;
+  }
+
   .ga-composer {
-    padding: 0.75rem 0.5rem 0.75rem;
+    padding: 0.55rem 0.5rem 0.55rem;
   }
 }

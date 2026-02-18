@@ -17,7 +17,15 @@
 
   const ENDPOINT = '/gift_advisor';
   const DEVICE_ID_KEY = 'giftadvisor_device_id_v1';
-  const INITIAL_ASSISTANT_MESSAGE = "Let's explore a great gift for someone you love.";
+  const INITIAL_ASSISTANT_MESSAGES = [
+    "Let's explore a great gift together.",
+    "Let's find a gift they'll truly love.",
+    "Tell me who you're shopping for, and we'll find something special.",
+    "Let's discover a thoughtful gift for your loved one.",
+    "Ready to explore gift ideas? Let's start with your loved one.",
+    "Let's pick a meaningful gift that feels just right.",
+  ];
+  const ASSISTANT_TYPING_CPS = 34; // medium speed
 
   let selectedOccasion = '';
   let selectedBudget = { min: null, max: null };
@@ -102,11 +110,44 @@
     heroEl.classList.toggle('is-hidden', messages.length > 0);
   }
 
+  function getInitialAssistantMessage() {
+    if (!Array.isArray(INITIAL_ASSISTANT_MESSAGES) || INITIAL_ASSISTANT_MESSAGES.length === 0) {
+      return "Let's explore a great gift together.";
+    }
+    const idx = Math.floor(Math.random() * INITIAL_ASSISTANT_MESSAGES.length);
+    return INITIAL_ASSISTANT_MESSAGES[idx];
+  }
+
+  async function typeAssistantText(el, text, cps = ASSISTANT_TYPING_CPS) {
+    if (!el) return;
+    const full = normalize(stripSearchQueriesFromReply(stripJsonReply(text)));
+    if (!full) {
+      el.textContent = '';
+      return;
+    }
+    const safeCps = Math.max(12, Number(cps) || ASSISTANT_TYPING_CPS);
+    const stepMs = Math.max(14, Math.round(1000 / safeCps));
+    el.textContent = '';
+    for (let i = 1; i <= full.length; i++) {
+      el.textContent = full.slice(0, i);
+      if (i % 3 === 0 || i === full.length) scrollToBottom();
+      await new Promise((resolve) => setTimeout(resolve, stepMs));
+    }
+  }
+
   function renderInitialAssistantMessage() {
     if (!messagesEl) return;
     if (heroEl) heroEl.classList.add('is-hidden');
     messagesEl.classList.add('ga-messages--intro');
-    renderMessage('assistant', INITIAL_ASSISTANT_MESSAGE);
+    const { bubble } = renderMessage('assistant', '');
+    bubble.innerHTML = '';
+    const textEl = document.createElement('div');
+    textEl.className = 'ga-reply';
+    textEl.style.whiteSpace = 'pre-wrap';
+    bubble.appendChild(textEl);
+    typeAssistantText(textEl, getInitialAssistantMessage()).then(() => {
+      textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
+    });
     scheduleAutoScroll();
   }
 
@@ -540,7 +581,7 @@
             resultsContainer.appendChild(gotOptionsEl);
             const briefEl = document.createElement('div');
             briefEl.className = 'ga-results__brief';
-            briefEl.innerHTML = formatReplyHtml(replyStr);
+            briefEl.style.whiteSpace = 'pre-wrap';
             resultsContainer.appendChild(briefEl);
             productsByQuery.forEach(({ query, subtitle, products }) => {
               if (!products || !products.length) return;
@@ -560,11 +601,17 @@
               resultsContainer.appendChild(section);
             });
             typingBubble.appendChild(resultsContainer);
+            typeAssistantText(briefEl, replyStr).then(() => {
+              briefEl.innerHTML = formatReplyHtml(replyStr);
+            });
           } else {
             const textEl = document.createElement('div');
             textEl.className = 'ga-reply';
-            textEl.innerHTML = formatReplyHtml(replyStr);
+            textEl.style.whiteSpace = 'pre-wrap';
             typingBubble.appendChild(textEl);
+            typeAssistantText(textEl, replyStr).then(() => {
+              textEl.innerHTML = formatReplyHtml(replyStr);
+            });
           }
 
           messages.push({

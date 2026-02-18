@@ -304,6 +304,11 @@ Rules:
 - Do NOT propose new searches or new products.
 - If the answer cannot be determined from shortlist data, say so clearly.
 - Keep the answer concise, practical, and user-facing.
+- Output plain text only in "reply". No markdown links, no image markdown, no raw URLs.
+- Prefer this structure:
+  - One-line recommendation first (which one is best and why).
+  - Then up to 3 short bullet lines with: product name, price, rating/reviews, and one reason.
+  - End with one short next-step question.
 - Return ONLY valid JSON:
 {
   "reply": "string"
@@ -927,6 +932,22 @@ def _compact_ui_text(reply: str) -> str:
     return reply
 
 
+def _sanitize_reply_markdown_artifacts(reply: str) -> str:
+    """Strip markdown artifacts that render poorly in chat bubbles."""
+    t = str(reply or "").strip()
+    if not t:
+        return t
+    # Remove markdown images completely.
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", t)
+    # Convert markdown links to visible link text only.
+    t = re.sub(r"\[([^\]]+)\]\((?:https?://[^)]+)\)", r"\1", t)
+    # Remove naked URLs that clutter response formatting.
+    t = re.sub(r"https?://\S+", "", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"\n[ \t]+\n", "\n\n", t)
+    return _compact_ui_text(t)
+
+
 def _strip_search_queries_from_reply(reply: str) -> str:
     """Remove 'Search Queries:' and everything after from reply."""
     import re
@@ -976,6 +997,7 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
             r"(?i)\b(?:let\s+me\s+know|share|tell\s+me)\s+(?:if\s+you\s+have\s+)?(?:a\s+)?budget(?:\s+range)?\b[^?.!]*[?.!]?",
             r"(?i)\byou\s+mentioned[^?.!]*\$\s*\d+[^?.!]*is\s+that\s+correct[^?.!]*[?.!]?",
             r"(?i)\bare\s+you\s+still\s+comfortable\s+with[^?.!]*\$\s*\d+[^?.!]*[?.!]?",
+            r"(?i)\byou\s+mentioned\s+(?:a\s+)?range\s+of\s+\d+\s*(?:to|-)\s*\d+[^?.!]*[?.!]?",
         ]
         for pat in budget_patterns:
             text = re.sub(pat, " ", text)
@@ -1180,7 +1202,7 @@ def _answer_from_shortlist(
         parsed = _safe_json_loads(raw)
         reply = parsed.get("reply") if isinstance(parsed, dict) else None
         if isinstance(reply, str) and reply.strip():
-            return reply.strip()
+            return _sanitize_reply_markdown_artifacts(reply.strip())
     except Exception as e:
         logger.warning("Shortlist QA call failed: %s", e)
     return None
@@ -1208,16 +1230,9 @@ def _is_affirmation(message: str) -> bool:
 
 
 def _allow_explore_without_interests(message: str, history: list) -> bool:
-    if _is_open_explore_intent(message):
-        return True
-    if _is_affirmation(message) and isinstance(history, list):
-        for h in reversed(history[-4:]):
-            if not isinstance(h, dict) or h.get("role") != "assistant":
-                continue
-            c = str(h.get("content") or "").lower()
-            if "open to a variety of gift ideas" in c or "more options" in c or "different style" in c:
-                return True
-    return False
+    # Only explicit user intent should unlock explore-without-interests.
+    # Short affirmations like "yes/ok" should not bypass interest collection.
+    return _is_open_explore_intent(message)
 
 
 def _validate_payload(obj: dict) -> tuple[bool, str]:
@@ -1265,17 +1280,26 @@ def _resolve_search_queries(
         return []
     if not isinstance(strategy, dict):
         return []
+    mode = str(strategy.get("mode") or "").strip().lower()
     # Hard gate: never search unless we have interests/hobbies or an explicit product.
     interests = effective_ctx.get("interests") if isinstance(effective_ctx, dict) else None
     has_interests = isinstance(interests, list) and any(str(i or "").strip() for i in interests)
     has_product = bool(str((effective_ctx or {}).get("product") or "").strip()) if isinstance(effective_ctx, dict) else False
+    # Also require that interest/product didn't come only from an affirmation turn.
+    # This prevents LLM-inferred products from bypassing discovery on "yes/ok".
+    incoming_ctx = gift_context if isinstance(gift_context, dict) else {}
+    incoming_interests = incoming_ctx.get("interests")
+    incoming_has_interests = isinstance(incoming_interests, list) and any(str(i or "").strip() for i in incoming_interests)
+    incoming_has_product = bool(str(incoming_ctx.get("product") or "").strip())
+    if _is_affirmation(message) and not incoming_has_interests and not incoming_has_product and not _is_open_explore_intent(message):
+        return []
     if not (has_interests or has_product):
         has_recipient = bool(str((effective_ctx or {}).get("recipient") or "").strip()) if isinstance(effective_ctx, dict) else False
         has_occasion = bool(str((effective_ctx or {}).get("occasion") or "").strip()) if isinstance(effective_ctx, dict) else False
         bmin = (effective_ctx or {}).get("budget_min") if isinstance(effective_ctx, dict) else None
         bmax = (effective_ctx or {}).get("budget_max") if isinstance(effective_ctx, dict) else None
         has_budget = bmin is not None or bmax is not None
-        if not (allow_explore_without_interests and has_recipient and has_occasion and has_budget):
+        if not (allow_explore_without_interests and mode == "explore" and has_recipient and has_occasion and has_budget):
             return []
     query_subtitles = []
     for q in (strategy.get("queries") or [])[:3]:
