@@ -36,6 +36,7 @@
   let peopleProfiles = null;
   const likedProductsByProfile = new Map();
   const dislikedProductsByProfile = new Map();
+  let stickToBottom = true;
 
   function createLocalDeviceId() {
     try {
@@ -136,7 +137,7 @@
       el.textContent = full.slice(0, i);
       if (i % 3 === 0 || i === full.length) {
         if (scrollMode === 'messages' && messagesEl) {
-          messagesEl.scrollTop = messagesEl.scrollHeight;
+          if (stickToBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
         } else {
           scrollToBottom();
         }
@@ -487,11 +488,17 @@
     return { row, bubble };
   }
 
-  function scrollToBottom() {
+  function isNearBottom() {
+    if (!messagesEl) return true;
+    const distance = messagesEl.scrollHeight - (messagesEl.scrollTop + messagesEl.clientHeight);
+    return distance <= 88;
+  }
+
+  function scrollToBottom(force = false) {
+    if (!messagesEl) return;
+    if (!force && !stickToBottom) return;
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    // Keep the page anchored to the latest row so the composer stays visible.
-    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' });
-    if (formEl) {
+    if (force && formEl) {
       const rect = formEl.getBoundingClientRect();
       const isOutOfView = rect.bottom > window.innerHeight || rect.top < 0;
       if (isOutOfView) {
@@ -500,10 +507,16 @@
     }
   }
 
-  function scheduleAutoScroll() {
-    scrollToBottom();
-    requestAnimationFrame(() => scrollToBottom());
-    setTimeout(() => scrollToBottom(), 120);
+  function scheduleAutoScroll(force = false) {
+    scrollToBottom(force);
+    requestAnimationFrame(() => scrollToBottom(force));
+    setTimeout(() => scrollToBottom(force), 120);
+  }
+
+  if (messagesEl) {
+    messagesEl.addEventListener('scroll', () => {
+      stickToBottom = isNearBottom();
+    }, { passive: true });
   }
 
   function getAccumulatedContext() {
@@ -696,6 +709,7 @@
     messages.push({ role: 'user', content: msg });
     renderMessage('user', msg);
     setHeroVisibility();
+    stickToBottom = true;
 
     sendBtn.disabled = true;
 
@@ -806,6 +820,6 @@
     typingRow.classList.remove('ga-msg--assistant');
     typingRow.classList.add('ga-msg--assistant');
     sendBtn.disabled = false;
-    scheduleAutoScroll();
+    scheduleAutoScroll(true);
   });
 })();

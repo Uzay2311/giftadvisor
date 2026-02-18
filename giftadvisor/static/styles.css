@@ -551,7 +551,7 @@ body {
   height: 28px;
   border-radius: 999px;
   border: 1px solid var(--border2);
-  background: #f1f1f1;
+  background: transparent;
   color: #777;
   display: inline-flex;
   align-items: center;
@@ -564,7 +564,7 @@ body {
 
 .ga-feedback:hover {
   border-color: #c7c7c7;
-  background: #ececec;
+  background: #f1f1f1;
   color: #555;
 }
 
