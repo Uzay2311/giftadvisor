@@ -27,7 +27,7 @@
     "Ready to explore gift ideas? Let's start with your loved one.",
     "Let's pick a meaningful gift that feels just right.",
   ];
-  const ASSISTANT_TYPING_CPS = 34; // medium speed
+  const ASSISTANT_TYPING_CPS = 52; // faster, still readable
 
   let selectedOccasion = '';
   let selectedBudget = { min: null, max: null };
@@ -708,6 +708,7 @@
 
     messages.push({ role: 'user', content: msg });
     renderMessage('user', msg);
+    scheduleAutoScroll(true);
     setHeroVisibility();
     stickToBottom = true;
 

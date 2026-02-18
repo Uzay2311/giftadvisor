@@ -214,6 +214,9 @@ Core behaviors:
 - Keep responses concise and actionable (2-4 sentences typically)
 - Use bullet points for multiple suggestions
 - Be encouraging and creative—help people feel confident in their choice
+- Never end a turn with a dead-end statement. End with one clear next step (a focused question or a concrete action choice).
+- If user sends social/filler acknowledgments (e.g., "nice products thanks"), respond warmly and continue the flow without unnecessary re-search.
+- Conversation goal: collect enough useful detail -> generate high-quality options -> revise with feedback -> narrow down to one best gift.
 
 Formatting:
 - Use \\n for new lines. Avoid \\n\\n.
@@ -278,6 +281,8 @@ RULES (VERY IMPORTANT):
 17. If the user is asking to compare/rank/evaluate already shown products (e.g., "which one is best", "which should I pick", "compare these"), set search_strategy = null and answer using existing shortlisted products only (no new search).
 18. If the user explicitly asks to explore/trending/surprise (e.g. "help me explore", "show me trending"), you may proceed with search_strategy even when interests are missing, as long as recipient + occasion + budget are already known.
 19. If gift_context includes liked_products or disliked_products, use them as preference signals: align next queries with liked product patterns and avoid themes/categories similar to disliked products.
+20. If the user message is social acknowledgment/filler (e.g., "nice products thanks", "awesome, thank you"), keep the conversation warm and engaging but set search_strategy = null unless they explicitly ask for more/refinement.
+21. Avoid dead-end filler lines (e.g., "This will help me...") without a next step. If you are not searching in this turn, ask exactly one focused follow-up question.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -1015,73 +1020,57 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
         " ",
         text,
     )
+    # Remove low-value generic filler lines that often cause dead-end turns.
+    text = re.sub(
+        r"(?i)(?:^|[.!?]\s+)(?:thanks\s+for\s+sharing|this\s+will\s+help\s+me\s+find\s+the\s+perfect\s+options?\s+for\s+(?:him|her|them|you))[^.!?]*[.!?]?",
+        " ",
+        text,
+    )
 
     # Cleanup connective artifacts after fragment removal.
     text = re.sub(r"(?i)\b(and|also)\s*(?:,)?\s*(and|also)\b", r"\1", text)
     text = re.sub(r"\s*,\s*", ", ", text)
     text = re.sub(r"\s{2,}", " ", text).strip(" ,;.-")
     text = re.sub(r"(?i)\b(?:and|also)\s*$", "", text).strip(" ,;.-")
+    # Remove clipped trailing stubs left after aggressive phrase stripping.
+    text = re.sub(r"(?i)\b(?:i\s+see|i\s+can\s+see|got\s+it|understood)\s*$", "", text).strip(" ,;.-")
 
-    # Guard against awkward tiny remnants like "Great!"
-    if len(text) < 12 or text.lower() in ("this will help me suggest the best options for you", "this will help me tailor the suggestions even more"):
-        has_interests = bool(gift_context.get("interests"))
-        has_product = bool(str(gift_context.get("product") or "").strip())
-        has_recipient = bool(str(gift_context.get("recipient") or "").strip())
-        g = str(gift_context.get("gender") or "").strip().lower()
-        pronoun = "she" if g == "women" else "he" if g == "men" else "they"
-        interest_q = (
-            f"Great! What is {pronoun} into these days (hobbies, style, or favorite things)?"
-            if pronoun in ("she", "he")
-            else "Great! What are they into these days (hobbies, style, or favorite things)?"
-        )
-        if not has_recipient:
-            text = "Great! Who is the gift for?"
-        elif not has_interests and not has_product:
-            text = interest_q
-        elif not has_budget:
-            text = "Great! What budget range should I target?"
-        else:
-            text = "Great! Any specific style, brand, or type of gift you want to prioritize?"
+    # If cleanup left a plain statement without terminal punctuation, close it cleanly.
+    if text and text[-1] not in ".!?":
+        text = text + "."
 
     return _compact_ui_text(text)
 
 
 def _ensure_next_step(reply: str, gift_context: Optional[dict], has_products: bool = False) -> str:
-    """Ensure assistant reply always contains a clear next step."""
+    """Keep reply minimally processed; avoid rule-based conversational rewrites."""
     text = _compact_ui_text(reply or "")
     if not text:
-        text = "I can help with that."
-    lower = text.lower()
-
-    # If we already provide an explicit question, keep it.
+        return "Could you share a bit more detail?"
     if "?" in text:
         return text
 
-    if has_products:
-        # After showing products, guide users to a clear refinement path.
-        return _compact_ui_text(
-            f"{text} Would you like more options, a different style, or a tighter budget range?"
+    lower = text.lower()
+    looks_generic = bool(
+        re.search(
+            r"\b(this will help|thanks for sharing|perfect options|great now that i know)\b",
+            lower,
+            re.I,
         )
+    )
+    if not looks_generic:
+        return text
 
     ctx = gift_context if isinstance(gift_context, dict) else {}
     has_recipient = bool(str(ctx.get("recipient") or "").strip())
     has_occasion = bool(str(ctx.get("occasion") or "").strip())
     has_budget = ctx.get("budget_min") is not None or ctx.get("budget_max") is not None
     has_interest = bool(ctx.get("interests")) or bool(str(ctx.get("product") or "").strip())
-
-    if not has_recipient:
-        return "Great! Who is the gift for?"
-    if not has_occasion:
-        return "Great! What is the occasion?"
-    if not has_budget:
-        return "Great! What budget range should I target?"
-    if not has_interest:
-        return "Great! What are they into these days (hobbies, style, or favorite things)?"
-
-    # Context is sufficient but LLM still returned a closed statement.
-    if any(k in lower for k in ("thank you", "this will help", "great", "perfect", "got it")):
-        return "Great! Would you like me to search now, or refine the gift type first?"
-    return _compact_ui_text(f"{text} What should I optimize for first: style, practicality, or uniqueness?")
+    if has_products:
+        return _compact_ui_text(f"{text} Would you like more options, or should I narrow to one best pick?")
+    if has_recipient and has_occasion and has_budget and has_interest:
+        return _compact_ui_text(f"{text} Would you like me to search now or refine the gift type first?")
+    return _compact_ui_text(f"{text} What should we refine next: occasion, budget, or interests?")
 
 
 def _reply_asks_for_info(reply: str) -> bool:
@@ -1200,6 +1189,37 @@ def _message_asks_about_shortlist(message: str) -> bool:
         "pick one", "top one", "which should i pick", "which should i choose", "from these",
     )
     return any(t in m for t in triggers)
+
+
+def _is_social_filler_message(message: str) -> bool:
+    """Detect short gratitude/acknowledgement turns that should not trigger new search."""
+    m = str(message or "").strip().lower()
+    if not m:
+        return False
+    m = re.sub(r"[^\w\s]", " ", m)
+    m = re.sub(r"\s{2,}", " ", m).strip()
+    if not m:
+        return False
+    explicit_action_terms = (
+        "search", "show", "more", "another", "different", "revise", "refine", "compare",
+        "best", "which", "pick", "buy", "recommend", "options", "budget", "under", "between",
+        "surprise", "trending", "explore",
+    )
+    if any(t in m for t in explicit_action_terms):
+        return False
+    filler_patterns = (
+        r"^(thanks|thank you|thankyou|thx|ty)$",
+        r"^(nice|great|awesome|perfect|cool|good)\s+(products|options|ideas|suggestions)$",
+        r"^(nice|great|awesome|perfect|cool|good)\s+(products|options|ideas|suggestions)\s+(thanks|thank you|thx|ty)$",
+        r"^(looks good|sounds good|that works|good stuff)$",
+        r"^(appreciate it|much appreciated)$",
+    )
+    if any(re.search(p, m, re.I) for p in filler_patterns):
+        return True
+    token_count = len(m.split())
+    if token_count <= 5 and ("thank" in m or "thanks" in m):
+        return True
+    return False
 
 
 def _answer_from_shortlist(
@@ -1502,6 +1522,11 @@ def gift_advisor_chat():
                 effective_input_context,
                 parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
             )
+            if _is_social_filler_message(message):
+                if not isinstance(parsed, dict):
+                    reply_fallback = _strip_search_queries_from_reply(_compact_ui_text(raw)) or "Thanks! Happy to help."
+                    parsed = {"reply": reply_fallback, "gift_context": {}, "search_strategy": None}
+                parsed["search_strategy"] = None
             # If user asks about already shown products, do shortlist analysis only (no new search).
             if previous_products_by_query and _message_asks_about_shortlist(message):
                 shortlist_reply = _answer_from_shortlist(
@@ -1654,6 +1679,11 @@ def gift_advisor_chat():
                     effective_input_context,
                     parsed.get("gift_context") if isinstance(parsed, dict) and isinstance(parsed.get("gift_context"), dict) else {}
                 )
+                if _is_social_filler_message(message):
+                    if not isinstance(parsed, dict):
+                        reply_fallback = _strip_search_queries_from_reply(_compact_ui_text(raw_buf)) or "Thanks! Happy to help."
+                        parsed = {"reply": reply_fallback, "gift_context": {}, "search_strategy": None}
+                    parsed["search_strategy"] = None
                 # If user asks about already shown products, do shortlist analysis only (no new search).
                 if previous_products_by_query and _message_asks_about_shortlist(message):
                     shortlist_reply = _answer_from_shortlist(
@@ -1725,8 +1755,17 @@ def gift_advisor_chat():
                 yield _sse("final", payload)
                 yield _sse("done", {"ok": True})
             except Exception as e:
-                yield _sse("error", {"ok": False, "error": "Server error"})
-                print("Exception in gift_advisor stream:", repr(e))
+                logger.exception("Exception in gift_advisor stream")
+                fallback_payload = {
+                    "reply": "I hit a temporary issue while fetching product options. Please try again, and I will retry right away.",
+                    "gift_context": effective_input_context if isinstance(effective_input_context, dict) else {},
+                    "people_profiles": people_profiles,
+                    "active_profile_id": active_profile_id,
+                    "system_abuser_flag": int(system_abuser_flag),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+                yield _sse("final", fallback_payload)
+                yield _sse("done", {"ok": False})
 
         headers = {
             "Content-Type": "text/event-stream; charset=utf-8",
