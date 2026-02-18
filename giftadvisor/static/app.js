@@ -121,29 +121,43 @@
     return INITIAL_ASSISTANT_MESSAGES[idx];
   }
 
-  async function typeAssistantText(el, text, scrollMode = 'page') {
+  async function typeAssistantText(el, text, scrollMode = 'page', animate = false, cps = 84) {
     if (!el) return;
     const full = normalize(stripSearchQueriesFromReply(stripJsonReply(text)));
-    el.textContent = full || '';
-    if (scrollMode === 'messages' && messagesEl) {
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    } else {
-      scrollToBottom(true);
+    if (!animate) {
+      el.textContent = full || '';
+      if (scrollMode === 'messages' && messagesEl) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      } else {
+        scrollToBottom(true);
+      }
+      return;
+    }
+    const safe = full || '';
+    const safeCps = Math.max(36, Number(cps) || 84);
+    const stepMs = Math.max(8, Math.round(1000 / safeCps));
+    el.textContent = '';
+    for (let i = 1; i <= safe.length; i++) {
+      el.textContent = safe.slice(0, i);
+      if (scrollMode === 'messages' && messagesEl) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      } else {
+        scrollToBottom(true);
+      }
+      await new Promise((resolve) => setTimeout(resolve, stepMs));
     }
   }
 
   function renderInitialAssistantMessage() {
     if (!messagesEl) return;
     if (heroEl) heroEl.classList.add('is-hidden');
-    if (chatEl) chatEl.classList.add('ga-chat--intro-compact');
-    messagesEl.classList.add('ga-messages--intro');
     const { bubble } = renderMessage('assistant', '');
     bubble.innerHTML = '';
     const textEl = document.createElement('div');
     textEl.className = 'ga-reply';
     textEl.style.whiteSpace = 'pre-wrap';
     bubble.appendChild(textEl);
-    typeAssistantText(textEl, getInitialAssistantMessage(), 'messages').then(() => {
+    typeAssistantText(textEl, getInitialAssistantMessage(), 'messages', true, 86).then(() => {
       textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
     });
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -675,8 +689,6 @@
     e.preventDefault();
     const msg = (inputEl.value || '').trim();
     if (!msg) return;
-    if (chatEl) chatEl.classList.remove('ga-chat--intro-compact');
-    messagesEl.classList.remove('ga-messages--intro');
 
     inputEl.value = '';
     inputEl.style.height = 'auto';

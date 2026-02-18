@@ -189,13 +189,6 @@ body {
   justify-content: flex-end;
 }
 
-.ga-messages.ga-messages--intro {
-  flex: 0 0 auto;
-  min-height: 0;
-  justify-content: flex-start;
-  margin-top: 0.42rem;
-}
-
 .ga-msg {
   margin-bottom: 1rem;
   animation: ga-fade-in 0.3s ease;
@@ -627,8 +620,8 @@ body {
 }
 
 .ga-inputwrap:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-color: var(--border2);
+  box-shadow: none;
 }
 
 .ga-input {
@@ -708,15 +701,6 @@ body {
     min-height: calc(100dvh - 132px);
   }
 
-  .ga-chat.ga-chat--intro-compact {
-    min-height: auto;
-  }
-
-  .ga-chat.ga-chat--intro-compact .ga-chat__center {
-    flex: 0 0 auto;
-    overflow: visible;
-  }
-
   .ga-chat__center {
     padding: 0.55rem 0.5rem 0;
     gap: 0.55rem;
@@ -750,14 +734,6 @@ body {
 
   .ga-messages {
     min-height: 56px;
-  }
-
-  .ga-messages.ga-messages--intro .ga-msg {
-    margin-bottom: 0.68rem;
-  }
-
-  .ga-messages.ga-messages--intro {
-    margin-top: 0.5rem;
   }
 
   .ga-composer {

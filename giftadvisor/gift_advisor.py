@@ -47,7 +47,7 @@ def _call_llm(messages: list, stream: bool = False):
             chat_messages.append({"role": role, "content": content})
 
     return client.chat.completions.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
         messages=chat_messages,
         temperature=0.2,
         response_format={"type": "json_object"},
@@ -164,7 +164,16 @@ def _build_effective_input_context(
     profile = profiles[chosen_idx]
     selected_id = str(profile.get("id") or _next_profile_id(store))
     base = profile.get("context") if isinstance(profile.get("context"), dict) else {}
-    base = merge_search_state(base, gift_context if isinstance(gift_context, dict) else {})
+    incoming_ctx = gift_context if isinstance(gift_context, dict) else {}
+    if msg_recipient:
+        # Explicit recipient mention means we are pivoting person context.
+        # Keep the selected profile as source-of-truth and only carry generic
+        # cross-profile constraints that are safe to reuse.
+        carry_keys = ("occasion", "budget_min", "budget_max")
+        carry_ctx = {k: incoming_ctx.get(k) for k in carry_keys if incoming_ctx.get(k) is not None}
+        base = merge_search_state(base, carry_ctx)
+    else:
+        base = merge_search_state(base, incoming_ctx)
 
     ui_ctx = {}
     if occasion:
@@ -250,7 +259,8 @@ Do not include markdown fences, explanations, or any text before/after the JSON 
         "subtitle": "string (user-friendly display title, e.g. 'Thoughtful picks for her' or 'Gifts for her 45th'—NOT the raw query)"
       }
     ]
-  } | null
+  } | null,
+  "shortlist_intent": boolean
 }
 
 RULES (VERY IMPORTANT):
@@ -278,13 +288,15 @@ RULES (VERY IMPORTANT):
 14. If user asks for "more options", "other ideas", "something different", or is unhappy with current picks, keep ALL hard constraints but generate NEW creative query angles. Do not repeat prior queries from previous_search_queries/people_profiles context unless no alternatives exist.
 15. For "more options" requests with enough context, prefer search_strategy.mode="explore" with 3 diverse, non-overlapping query intents (e.g., accessories vs premium core product vs experiential gift) while preserving recipient, age fit, occasion, and budget.
 16. If user says "surprise me" (or similar open-ended intent), you may use a trending/explore approach and return diverse creative queries even when interests are limited. Still preserve known hard constraints (recipient, age fit, occasion, budget) and avoid repeating prior queries.
-17. If the user is asking to compare/rank/evaluate already shown products (e.g., "which one is best", "which should I pick", "compare these"), set search_strategy = null and answer using existing shortlisted products only (no new search).
+17. If the user is asking to compare/rank/evaluate already shown products (e.g., "which one is best", "which should I pick", "compare these"), set search_strategy = null and set shortlist_intent = true so the system routes to shortlist analysis (no new external search).
 18. If the user explicitly asks to explore/trending/surprise (e.g. "help me explore", "show me trending"), you may proceed with search_strategy even when interests are missing, as long as recipient + occasion + budget are already known.
 19. If gift_context includes liked_products or disliked_products, use them as preference signals: align next queries with liked product patterns and avoid themes/categories similar to disliked products.
 20. If the user message is social acknowledgment/filler (e.g., "nice products thanks", "awesome, thank you"), keep the conversation warm and engaging but set search_strategy = null unless they explicitly ask for more/refinement.
 21. Avoid dead-end filler lines (e.g., "This will help me...") without a next step. If you are not searching in this turn, ask exactly one focused follow-up question.
 22. Maintain this flow naturally: discovery -> search -> revise -> pinpoint one best gift. After showing options, guide user toward either refinement or selecting a single best pick.
 23. When enough context is already known, avoid repetitive clarification loops; move the conversation forward with a concrete action choice.
+24. If the user switches recipient/person (e.g., "for my wife", "let's move to my son", "that was for my son"), pivot immediately to that person. Do NOT carry prior person's interests/product as confirmed facts; ask one focused discovery question for the new person unless that profile already has enough context.
+25. Do NOT claim curated products, direct seller links, or specific store listings unless you are also returning search_strategy to trigger real product retrieval. If search_strategy is null, keep the reply conversational and ask the next focused question/action.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -1126,7 +1138,11 @@ def _enforce_budget_on_query(query: str, gift_context: Optional[dict]) -> str:
     if has_min and has_max:
         budget_phrase = f"between ${int(float(bmin))} and ${int(float(bmax))}"
     elif has_max:
-        budget_phrase = f"under ${int(float(bmax))}"
+        # If only an upper limit is known (e.g., "up to $300"),
+        # search a tighter range to improve relevance.
+        max_v = int(float(bmax))
+        min_v = max(1, int(round(max_v / 2)))
+        budget_phrase = f"between ${min_v} and ${max_v}"
     else:
         budget_phrase = f"over ${int(float(bmin))}"
     return f"{q} {budget_phrase}".strip()
@@ -1193,6 +1209,8 @@ def _message_asks_about_shortlist(message: str) -> bool:
         "compare", "difference", "worth", "value", "reviews", "rating", "reliable",
         "should i buy", "recommend from", "among these", "between these", "between them",
         "pick one", "top one", "which should i pick", "which should i choose", "from these",
+        "best option", "pick the best", "choose the best", "pick best option", "choose best option",
+        "pick the best option", "choose the best option",
     )
     return any(t in m for t in triggers)
 
@@ -1226,6 +1244,15 @@ def _is_social_filler_message(message: str) -> bool:
     if token_count <= 5 and ("thank" in m or "thanks" in m):
         return True
     return False
+
+
+def _llm_requests_shortlist(parsed: Optional[dict], previous_products_by_query: list) -> bool:
+    """LLM-directed shortlist routing (no keyword/rule matching on user text)."""
+    return bool(
+        previous_products_by_query
+        and isinstance(parsed, dict)
+        and parsed.get("shortlist_intent") is True
+    )
 
 
 def _answer_from_shortlist(
@@ -1390,6 +1417,7 @@ def gift_advisor_chat():
         disliked_products = _normalize_feedback_products(data.get("disliked_products"))
         people_profiles = _normalize_people_profiles(data.get("people_profiles"))
         active_profile_id = str(data.get("active_profile_id") or "").strip()
+        incoming_active_profile_id = active_profile_id
         previous_queries = data.get("previous_queries")
         previous_products_by_query = _normalize_products_by_query(data.get("previous_products_by_query"))
         if not isinstance(gift_context, dict):
@@ -1410,6 +1438,15 @@ def gift_advisor_chat():
             budget_min=budget_min,
             budget_max=budget_max,
         )
+        profile_switched = bool(
+            incoming_active_profile_id
+            and active_profile_id
+            and str(incoming_active_profile_id) != str(active_profile_id)
+        )
+        if profile_switched:
+            # Prevent old person's shortlist/query memory from leaking into this turn.
+            previous_queries = []
+            previous_products_by_query = []
 
         accept = (request.headers.get("Accept") or "").lower()
         wants_sse = "text/event-stream" in accept
