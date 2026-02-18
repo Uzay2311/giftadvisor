@@ -10,6 +10,7 @@
   const formEl = app.querySelector('[data-ga-form]');
   const inputEl = app.querySelector('[data-ga-input]');
   const sendBtn = app.querySelector('[data-ga-send]');
+  const chatEl = app.querySelector('.ga-chat');
   const heroEl = app.querySelector('[data-ga-hero]');
   const occasionEl = app.querySelector('[data-ga-occasion]');
   const chipsEl = app.querySelector('[data-ga-chips]');
@@ -138,6 +139,7 @@
   function renderInitialAssistantMessage() {
     if (!messagesEl) return;
     if (heroEl) heroEl.classList.add('is-hidden');
+    if (chatEl) chatEl.classList.add('ga-chat--intro-compact');
     messagesEl.classList.add('ga-messages--intro');
     const { bubble } = renderMessage('assistant', '');
     bubble.innerHTML = '';
@@ -535,6 +537,7 @@
     e.preventDefault();
     const msg = (inputEl.value || '').trim();
     if (!msg) return;
+    if (chatEl) chatEl.classList.remove('ga-chat--intro-compact');
     messagesEl.classList.remove('ga-messages--intro');
 
     inputEl.value = '';

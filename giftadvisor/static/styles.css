@@ -199,10 +199,10 @@ body {
 
 .ga-msg__bubble {
   max-width: 85%;
-  padding: 0.9rem 1.2rem;
+  padding: 0.48rem 0.74rem;
   border-radius: var(--radius-sm);
   font-size: 0.95rem;
-  line-height: 1.5;
+  line-height: 1.42;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -259,6 +259,11 @@ body {
   line-height: 1.5;
   color: var(--text);
   margin-bottom: 0.25rem;
+}
+
+.ga-reply p,
+.ga-results__brief p {
+  margin: 0;
 }
 
 /* Carousel section - title, subtitle, horizontal scroll */
@@ -612,6 +617,15 @@ body {
     min-height: calc(100dvh - 132px);
   }
 
+  .ga-chat.ga-chat--intro-compact {
+    min-height: auto;
+  }
+
+  .ga-chat.ga-chat--intro-compact .ga-chat__center {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
   .ga-chat__center {
     padding: 0.55rem 0.5rem 0;
     gap: 0.55rem;
@@ -644,7 +658,7 @@ body {
   }
 
   .ga-messages.ga-messages--intro .ga-msg {
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.12rem;
   }
 
   .ga-composer {
