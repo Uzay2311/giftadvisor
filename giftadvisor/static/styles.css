@@ -130,7 +130,7 @@ body {
 }
 
 .ga-occasion__label--sub {
-  margin-top: 0.9rem;
+  margin-top: 1.15rem;
 }
 
 .ga-occasion__chips {
@@ -192,6 +192,7 @@ body {
   flex: 0 0 auto;
   min-height: 0;
   justify-content: flex-start;
+  margin-top: 0.42rem;
 }
 
 .ga-msg {
@@ -730,7 +731,7 @@ body {
   }
 
   .ga-occasion__label--sub {
-    margin-top: 0.6rem;
+    margin-top: 0.85rem;
   }
 
   .ga-occasion__chips {
@@ -751,7 +752,11 @@ body {
   }
 
   .ga-messages.ga-messages--intro .ga-msg {
-    margin-bottom: 0.3rem;
+    margin-bottom: 0.68rem;
+  }
+
+  .ga-messages.ga-messages--intro {
+    margin-top: 0.5rem;
   }
 
   .ga-composer {
