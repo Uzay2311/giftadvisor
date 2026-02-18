@@ -27,7 +27,6 @@
     "Ready to explore gift ideas? Let's start with your loved one.",
     "Let's pick a meaningful gift that feels just right.",
   ];
-  const ASSISTANT_TYPING_CPS = 52; // faster, still readable
 
   let selectedOccasion = '';
   let selectedBudget = { min: null, max: null };
@@ -36,7 +35,6 @@
   let peopleProfiles = null;
   const likedProductsByProfile = new Map();
   const dislikedProductsByProfile = new Map();
-  let stickToBottom = true;
 
   function createLocalDeviceId() {
     try {
@@ -123,26 +121,14 @@
     return INITIAL_ASSISTANT_MESSAGES[idx];
   }
 
-  async function typeAssistantText(el, text, cps = ASSISTANT_TYPING_CPS, scrollMode = 'page') {
+  async function typeAssistantText(el, text, scrollMode = 'page') {
     if (!el) return;
     const full = normalize(stripSearchQueriesFromReply(stripJsonReply(text)));
-    if (!full) {
-      el.textContent = '';
-      return;
-    }
-    const safeCps = Math.max(12, Number(cps) || ASSISTANT_TYPING_CPS);
-    const stepMs = Math.max(14, Math.round(1000 / safeCps));
-    el.textContent = '';
-    for (let i = 1; i <= full.length; i++) {
-      el.textContent = full.slice(0, i);
-      if (i % 3 === 0 || i === full.length) {
-        if (scrollMode === 'messages' && messagesEl) {
-          if (stickToBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
-        } else {
-          scrollToBottom();
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, stepMs));
+    el.textContent = full || '';
+    if (scrollMode === 'messages' && messagesEl) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } else {
+      scrollToBottom(true);
     }
   }
 
@@ -157,7 +143,7 @@
     textEl.className = 'ga-reply';
     textEl.style.whiteSpace = 'pre-wrap';
     bubble.appendChild(textEl);
-    typeAssistantText(textEl, getInitialAssistantMessage(), ASSISTANT_TYPING_CPS, 'messages').then(() => {
+    typeAssistantText(textEl, getInitialAssistantMessage(), 'messages').then(() => {
       textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
     });
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -488,17 +474,12 @@
     return { row, bubble };
   }
 
-  function isNearBottom() {
-    if (!messagesEl) return true;
-    const distance = messagesEl.scrollHeight - (messagesEl.scrollTop + messagesEl.clientHeight);
-    return distance <= 88;
-  }
-
   function scrollToBottom(force = false) {
     if (!messagesEl) return;
-    if (!force && !stickToBottom) return;
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    if (force && formEl) {
+    // Keep page anchored to latest content always.
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' });
+    if (formEl) {
       const rect = formEl.getBoundingClientRect();
       const isOutOfView = rect.bottom > window.innerHeight || rect.top < 0;
       if (isOutOfView) {
@@ -511,12 +492,6 @@
     scrollToBottom(force);
     requestAnimationFrame(() => scrollToBottom(force));
     setTimeout(() => scrollToBottom(force), 120);
-  }
-
-  if (messagesEl) {
-    messagesEl.addEventListener('scroll', () => {
-      stickToBottom = isNearBottom();
-    }, { passive: true });
   }
 
   function getAccumulatedContext() {
@@ -710,7 +685,6 @@
     renderMessage('user', msg);
     scheduleAutoScroll(true);
     setHeroVisibility();
-    stickToBottom = true;
 
     sendBtn.disabled = true;
 

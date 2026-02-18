@@ -283,6 +283,8 @@ RULES (VERY IMPORTANT):
 19. If gift_context includes liked_products or disliked_products, use them as preference signals: align next queries with liked product patterns and avoid themes/categories similar to disliked products.
 20. If the user message is social acknowledgment/filler (e.g., "nice products thanks", "awesome, thank you"), keep the conversation warm and engaging but set search_strategy = null unless they explicitly ask for more/refinement.
 21. Avoid dead-end filler lines (e.g., "This will help me...") without a next step. If you are not searching in this turn, ask exactly one focused follow-up question.
+22. Maintain this flow naturally: discovery -> search -> revise -> pinpoint one best gift. After showing options, guide user toward either refinement or selecting a single best pick.
+23. When enough context is already known, avoid repetitive clarification loops; move the conversation forward with a concrete action choice.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -1043,7 +1045,7 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
 
 
 def _ensure_next_step(reply: str, gift_context: Optional[dict], has_products: bool = False) -> str:
-    """Keep reply minimally processed; avoid rule-based conversational rewrites."""
+    """Light safety net to avoid dead-end turns while keeping LLM-led wording."""
     text = _compact_ui_text(reply or "")
     if not text:
         return "Could you share a bit more detail?"
@@ -1058,7 +1060,11 @@ def _ensure_next_step(reply: str, gift_context: Optional[dict], has_products: bo
             re.I,
         )
     )
-    if not looks_generic:
+    looks_ack = bool(re.search(r"\b(thanks|thank you|glad|awesome|great|perfect)\b", lower, re.I))
+    very_short_statement = len(text.split()) <= 10
+    # Intervene only on likely dead-end statements.
+    needs_followup = bool(has_products or looks_generic or (looks_ack and very_short_statement))
+    if not needs_followup:
         return text
 
     ctx = gift_context if isinstance(gift_context, dict) else {}
@@ -1067,7 +1073,7 @@ def _ensure_next_step(reply: str, gift_context: Optional[dict], has_products: bo
     has_budget = ctx.get("budget_min") is not None or ctx.get("budget_max") is not None
     has_interest = bool(ctx.get("interests")) or bool(str(ctx.get("product") or "").strip())
     if has_products:
-        return _compact_ui_text(f"{text} Would you like more options, or should I narrow to one best pick?")
+        return _compact_ui_text(f"{text} Would you like more options, or should I narrow it to one best pick?")
     if has_recipient and has_occasion and has_budget and has_interest:
         return _compact_ui_text(f"{text} Would you like me to search now or refine the gift type first?")
     return _compact_ui_text(f"{text} What should we refine next: occasion, budget, or interests?")

@@ -120,6 +120,7 @@ body {
 /* Occasion chips */
 .ga-occasion {
   margin-bottom: 0.5rem;
+  display: none;
 }
 
 .ga-occasion__label {
