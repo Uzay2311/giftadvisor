@@ -18,7 +18,12 @@ import re
 import time
 import hashlib
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    import psycopg
+except Exception:
+    psycopg = None
 
 logger = logging.getLogger("gift_advisor")
 
@@ -32,6 +37,11 @@ except Exception:
 
 ABUSE_DB_PATH = os.path.join(os.path.dirname(__file__), "logs", "abuse_flags.sqlite3")
 GENERIC_ABUSE_REPLY = "I can help with gift suggestions, but I cannot process this request right now. Please try again with a normal, concise gift-related question."
+TELEMETRY_RETENTION_DAYS = max(1, min(int(os.getenv("TELEMETRY_RETENTION_DAYS", "90")), 3650))
+TELEMETRY_DB_URL = os.getenv("DATABASE_URL", "").strip()
+_telemetry_init_lock = threading.Lock()
+_telemetry_db_ready = False
+_telemetry_last_cleanup_ts = 0.0
 
 # Prefer Responses API if available; fallback to Chat Completions
 def _call_llm(messages: list, stream: bool = False):
@@ -383,6 +393,118 @@ def _normalize_device_id(raw_device_id: Optional[str]) -> str:
         + (request.headers.get("User-Agent") or "ua")
     )
     return "anon-" + hashlib.sha256(fallback_src.encode("utf-8")).hexdigest()[:24]
+
+
+def _normalize_session_id(raw_session_id: Optional[str], device_id: str) -> str:
+    sid = str(raw_session_id or "").strip().lower()
+    if sid and re.fullmatch(r"[a-z0-9._:-]{8,128}", sid):
+        return sid
+    seed = f"{device_id}:{int(time.time() // 1800)}"
+    return "sess-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+
+
+def _telemetry_enabled() -> bool:
+    return bool(TELEMETRY_DB_URL) and psycopg is not None
+
+
+def _ensure_telemetry_table():
+    global _telemetry_db_ready
+    if _telemetry_db_ready or not _telemetry_enabled():
+        return
+    with _telemetry_init_lock:
+        if _telemetry_db_ready:
+            return
+        try:
+            with psycopg.connect(TELEMETRY_DB_URL, connect_timeout=3) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS telemetry_events (
+                            id BIGSERIAL PRIMARY KEY,
+                            ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            event_name TEXT NOT NULL,
+                            device_id TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            route TEXT NOT NULL DEFAULT '/gift_advisor',
+                            latency_ms INTEGER,
+                            props JSONB NOT NULL DEFAULT '{}'::jsonb
+                        );
+                        """
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS telemetry_events_ts_idx ON telemetry_events (ts DESC);"
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS telemetry_events_event_ts_idx ON telemetry_events (event_name, ts DESC);"
+                    )
+                    cur.execute(
+                        "CREATE INDEX IF NOT EXISTS telemetry_events_device_ts_idx ON telemetry_events (device_id, ts DESC);"
+                    )
+                conn.commit()
+            _telemetry_db_ready = True
+        except Exception as e:
+            logger.warning("Telemetry init skipped: %s", e)
+
+
+def _telemetry_cleanup_if_needed():
+    global _telemetry_last_cleanup_ts
+    if not _telemetry_enabled() or not _telemetry_db_ready:
+        return
+    now = time.time()
+    if now - _telemetry_last_cleanup_ts < 3600:
+        return
+    _telemetry_last_cleanup_ts = now
+    try:
+        with psycopg.connect(TELEMETRY_DB_URL, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM telemetry_events WHERE ts < NOW() - (%s || ' days')::interval",
+                    (str(TELEMETRY_RETENTION_DAYS),),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.warning("Telemetry cleanup failed: %s", e)
+
+
+def _track_telemetry_event(
+    event_name: str,
+    device_id: str,
+    session_id: str,
+    latency_ms: Optional[int] = None,
+    props: Optional[dict] = None,
+):
+    if not _telemetry_enabled():
+        return
+    _ensure_telemetry_table()
+    if not _telemetry_db_ready:
+        return
+    safe_props = props if isinstance(props, dict) else {}
+    try:
+        props_json = json.dumps(safe_props, ensure_ascii=False)
+    except Exception:
+        props_json = "{}"
+    try:
+        with psycopg.connect(TELEMETRY_DB_URL, connect_timeout=3) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO telemetry_events (event_name, device_id, session_id, route, latency_ms, props)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        str(event_name or "").strip() or "unknown_event",
+                        str(device_id or "unknown_device"),
+                        str(session_id or "unknown_session"),
+                        "/gift_advisor",
+                        int(latency_ms) if isinstance(latency_ms, (int, float)) else None,
+                        props_json,
+                    ),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.warning("Telemetry insert failed: %s", e)
+        return
+    _telemetry_cleanup_if_needed()
 
 
 def _score_message_risk(message: str) -> int:
@@ -1405,7 +1527,9 @@ def gift_advisor_chat():
         message = (data.get("message") or "").strip()
         if not message:
             return jsonify({"error": "Missing message"}), 400
+        req_started = time.perf_counter()
         device_id = _normalize_device_id(data.get("device_id"))
+        session_id = _normalize_session_id(data.get("session_id"), device_id)
         system_abuser_flag = _check_and_update_abuse(device_id, message)
 
         occasion = (data.get("occasion") or "").strip()
@@ -1448,11 +1572,36 @@ def gift_advisor_chat():
             previous_queries = []
             previous_products_by_query = []
 
+        if len(history) <= 1:
+            _track_telemetry_event(
+                "session_started",
+                device_id=device_id,
+                session_id=session_id,
+                props={
+                    "history_len": len(history),
+                    "stream_requested": bool(data.get("stream")),
+                },
+            )
+
         accept = (request.headers.get("Accept") or "").lower()
         wants_sse = "text/event-stream" in accept
         wants_stream = bool(data.get("stream")) or wants_sse
 
         if system_abuser_flag == 1:
+            latency_ms = int((time.perf_counter() - req_started) * 1000)
+            _track_telemetry_event(
+                "chat_turn_completed",
+                device_id=device_id,
+                session_id=session_id,
+                latency_ms=latency_ms,
+                props={
+                    "blocked": True,
+                    "has_search": False,
+                    "products_count": 0,
+                    "profile_switched": bool(profile_switched),
+                    "stream_mode": bool(wants_stream),
+                },
+            )
             payload = {
                 "reply": GENERIC_ABUSE_REPLY,
                 "gift_context": gift_context or {},
@@ -1627,6 +1776,21 @@ def gift_advisor_chat():
                         history=history,
                         gift_context=effective_gift_context,
                     )
+                    _track_telemetry_event(
+                        "search_executed",
+                        device_id=device_id,
+                        session_id=session_id,
+                        props={
+                            "queries_count": len(new_query_subtitles),
+                            "queries": [q for q, _ in new_query_subtitles][:3],
+                            "products_count": sum(
+                                len(r.get("products") or [])
+                                for r in (products_by_query or [])
+                                if isinstance(r, dict)
+                            ),
+                            "stream_mode": False,
+                        },
+                    )
             else:
                 logger.info(
                     "[GIFT_ADVISOR] no_product_search | message=%r | history=%s | previous_queries=%s | gift_context=%s | llm_search_queries=%s | resolved=[]",
@@ -1637,6 +1801,26 @@ def gift_advisor_chat():
                     parsed.get("search_strategy") if isinstance(parsed, dict) else None,
                 )
             payload = _finalize_payload(parsed, raw, products_by_query=products_by_query if products_by_query else None)
+            latency_ms = int((time.perf_counter() - req_started) * 1000)
+            _track_telemetry_event(
+                "chat_turn_completed",
+                device_id=device_id,
+                session_id=session_id,
+                latency_ms=latency_ms,
+                props={
+                    "blocked": False,
+                    "has_search": bool(query_subtitles),
+                    "queries_count": len(query_subtitles or []),
+                    "products_count": sum(
+                        len(r.get("products") or [])
+                        for r in (products_by_query or [])
+                        if isinstance(r, dict)
+                    ),
+                    "profile_switched": bool(profile_switched),
+                    "shortlist_intent": bool(_llm_requests_shortlist(parsed, previous_products_by_query)),
+                    "stream_mode": False,
+                },
+            )
             return jsonify(payload)
 
         @stream_with_context
@@ -1786,6 +1970,21 @@ def gift_advisor_chat():
                             history=history,
                             gift_context=effective_gift_context,
                         )
+                        _track_telemetry_event(
+                            "search_executed",
+                            device_id=device_id,
+                            session_id=session_id,
+                            props={
+                                "queries_count": len(incremental_queries),
+                                "queries": incremental_queries[:3],
+                                "products_count": sum(
+                                    len(r.get("products") or [])
+                                    for r in (products_by_query or [])
+                                    if isinstance(r, dict)
+                                ),
+                                "stream_mode": True,
+                            },
+                        )
                 else:
                     logger.info(
                         "[GIFT_ADVISOR] no_product_search (stream) | message=%r | previous_queries=%s | gift_context=%s | llm_search_queries=%s",
@@ -1795,10 +1994,42 @@ def gift_advisor_chat():
                         parsed.get("search_strategy") if isinstance(parsed, dict) else None,
                     )
                 payload = _finalize_payload(parsed, raw_buf, products_by_query=products_by_query if products_by_query else None)
+                latency_ms = int((time.perf_counter() - req_started) * 1000)
+                _track_telemetry_event(
+                    "chat_turn_completed",
+                    device_id=device_id,
+                    session_id=session_id,
+                    latency_ms=latency_ms,
+                    props={
+                        "blocked": False,
+                        "has_search": bool(query_subtitles),
+                        "queries_count": len(query_subtitles or []),
+                        "products_count": sum(
+                            len(r.get("products") or [])
+                            for r in (products_by_query or [])
+                            if isinstance(r, dict)
+                        ),
+                        "profile_switched": bool(profile_switched),
+                        "shortlist_intent": bool(_llm_requests_shortlist(parsed, previous_products_by_query)),
+                        "stream_mode": True,
+                    },
+                )
                 yield _sse("final", payload)
                 yield _sse("done", {"ok": True})
             except Exception as e:
                 logger.exception("Exception in gift_advisor stream")
+                latency_ms = int((time.perf_counter() - req_started) * 1000)
+                _track_telemetry_event(
+                    "error_occurred",
+                    device_id=device_id,
+                    session_id=session_id,
+                    latency_ms=latency_ms,
+                    props={
+                        "stage": "stream",
+                        "error_type": type(e).__name__,
+                        "stream_mode": True,
+                    },
+                )
                 fallback_payload = {
                     "reply": "I hit a temporary issue while fetching product options. Please try again, and I will retry right away.",
                     "gift_context": effective_input_context if isinstance(effective_input_context, dict) else {},
@@ -1820,5 +2051,17 @@ def gift_advisor_chat():
 
     except Exception as e:
         err_msg = str(e)
+        try:
+            req_data = request.get_json(silent=True) or {}
+            err_device = _normalize_device_id(req_data.get("device_id"))
+            err_session = _normalize_session_id(req_data.get("session_id"), err_device)
+            _track_telemetry_event(
+                "error_occurred",
+                device_id=err_device,
+                session_id=err_session,
+                props={"stage": "route", "error_type": type(e).__name__, "stream_mode": False},
+            )
+        except Exception:
+            pass
         print("Exception in gift_advisor_chat:", repr(e))
         return jsonify({"error": err_msg or "Server error"}), 500

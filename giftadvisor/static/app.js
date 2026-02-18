@@ -19,6 +19,9 @@
 
   const ENDPOINT = '/gift_advisor';
   const DEVICE_ID_KEY = 'giftadvisor_device_id_v1';
+  const SESSION_ID_KEY = 'giftadvisor_session_id_v1';
+  const SESSION_LAST_ACTIVE_KEY = 'giftadvisor_session_last_active_ms_v1';
+  const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
   const INITIAL_ASSISTANT_MESSAGES = [
     "Let's explore a great gift together.",
     "Let's find a gift they'll truly love.",
@@ -55,6 +58,31 @@
       return created;
     } catch (_) {
       return createLocalDeviceId().toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 128);
+    }
+  }
+
+  function createLocalSessionId() {
+    const rand = Math.random().toString(36).slice(2, 12);
+    return 'sess-' + Date.now().toString(36) + '-' + rand;
+  }
+
+  function getOrCreateSessionId() {
+    const now = Date.now();
+    try {
+      const existing = String(localStorage.getItem(SESSION_ID_KEY) || '').trim().toLowerCase();
+      const lastRaw = Number.parseInt(localStorage.getItem(SESSION_LAST_ACTIVE_KEY) || '', 10);
+      const last = Number.isFinite(lastRaw) ? lastRaw : 0;
+      const freshEnough = !!last && (now - last) <= SESSION_TIMEOUT_MS;
+      if (existing && /^[a-z0-9._:-]{8,128}$/i.test(existing) && freshEnough) {
+        localStorage.setItem(SESSION_LAST_ACTIVE_KEY, String(now));
+        return existing;
+      }
+      const created = createLocalSessionId().toLowerCase().replace(/[^a-z0-9._:-]/g, '-').slice(0, 128);
+      localStorage.setItem(SESSION_ID_KEY, created);
+      localStorage.setItem(SESSION_LAST_ACTIVE_KEY, String(now));
+      return created;
+    } catch (_) {
+      return createLocalSessionId().toLowerCase().replace(/[^a-z0-9._:-]/g, '-').slice(0, 128);
     }
   }
 
@@ -580,6 +608,7 @@
       budget_min: Number.isFinite(selectedBudget.min) ? selectedBudget.min : undefined,
       budget_max: Number.isFinite(selectedBudget.max) ? selectedBudget.max : undefined,
       device_id: deviceId,
+      session_id: getOrCreateSessionId(),
       gift_context: Object.keys(gift_context).length > 0 ? gift_context : undefined,
       people_profiles,
       active_profile_id,
