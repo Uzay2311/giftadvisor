@@ -57,6 +57,22 @@ body {
   font-size: 1.75rem;
   font-weight: 600;
   color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.48rem;
+}
+
+.ga-logo__mark {
+  width: 1.55rem;
+  height: 1.55rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  font-size: 0.95rem;
+  line-height: 1;
 }
 
 .ga-tagline {
@@ -603,6 +619,12 @@ body {
     font-size: 1.45rem;
   }
 
+  .ga-logo__mark {
+    width: 1.35rem;
+    height: 1.35rem;
+    font-size: 0.82rem;
+  }
+
   .ga-tagline {
     margin-top: 0.1rem;
     font-size: 0.8rem;
@@ -658,7 +680,7 @@ body {
   }
 
   .ga-messages.ga-messages--intro .ga-msg {
-    margin-bottom: 0.12rem;
+    margin-bottom: 0.3rem;
   }
 
   .ga-composer {
