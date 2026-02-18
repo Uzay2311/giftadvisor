@@ -235,7 +235,9 @@ Do not include markdown fences, explanations, or any text before/after the JSON 
     "budget_min": number | null,
     "budget_max": number | null,
     "occasion": "string | null",
-    "interests": ["string"]
+    "interests": ["string"],
+    "liked_products": [{"title": "string", "price": "string"}],
+    "disliked_products": [{"title": "string", "price": "string"}]
   },
   "search_strategy": {
     "mode": "specific | explore",
@@ -275,6 +277,7 @@ RULES (VERY IMPORTANT):
 16. If user says "surprise me" (or similar open-ended intent), you may use a trending/explore approach and return diverse creative queries even when interests are limited. Still preserve known hard constraints (recipient, age fit, occasion, budget) and avoid repeating prior queries.
 17. If the user is asking to compare/rank/evaluate already shown products (e.g., "which one is best", "which should I pick", "compare these"), set search_strategy = null and answer using existing shortlisted products only (no new search).
 18. If the user explicitly asks to explore/trending/surprise (e.g. "help me explore", "show me trending"), you may proceed with search_strategy even when interests are missing, as long as recipient + occasion + budget are already known.
+19. If gift_context includes liked_products or disliked_products, use them as preference signals: align next queries with liked product patterns and avoid themes/categories similar to disliked products.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -283,6 +286,7 @@ You are a product ranking assistant for gift recommendations.
 Task:
 - Select the best top_k products from candidate products for the given context.
 - Prioritize: recipient fit, occasion fit, budget fit, interest/brand fit, and reliability signals.
+- If context contains liked_products/disliked_products, prefer items similar to liked ones and penalize items similar to disliked ones.
 - Reliability signals to prefer: higher rating, higher reviews, and stronger bought_last_month.
 - Avoid repetition: do NOT select near-duplicate products that are very similar in title/description/specs (e.g., same model with only minor variant differences) unless unique options are unavailable.
 - Deprioritize bulk/commercial listings (e.g., multi-pack classroom sets, wholesale packs, institutional bundles, large quantity lots) unless the user explicitly asks for bulk quantities.
@@ -304,6 +308,7 @@ Rules:
 - Do NOT propose new searches or new products.
 - If the answer cannot be determined from shortlist data, say so clearly.
 - Keep the answer concise, practical, and user-facing.
+- Respect gift_context.liked_products and gift_context.disliked_products when deciding "best"; prefer similarity to liked and avoid disliked patterns.
 - Output plain text only in "reply". No markdown links, no image markdown, no raw URLs.
 - Prefer this structure:
   - One-line recommendation first (which one is best and why).
@@ -1164,6 +1169,26 @@ def _normalize_products_by_query(items: Optional[list]) -> list:
     return out
 
 
+def _normalize_feedback_products(items: Optional[list]) -> list:
+    if not isinstance(items, list):
+        return []
+    out = []
+    seen = set()
+    for row in items[:40]:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        key = " ".join(title.lower().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        price = str(row.get("price") or "").strip()
+        out.append({"title": title[:220], "price": price[:64]})
+    return out
+
+
 def _message_asks_about_shortlist(message: str) -> bool:
     m = str(message or "").strip().lower()
     if not m:
@@ -1335,12 +1360,20 @@ def gift_advisor_chat():
         budget_max = data.get("budget_max")
         history = _normalize_history(data.get("history") or [])
         gift_context = data.get("gift_context")
+        liked_products = _normalize_feedback_products(data.get("liked_products"))
+        disliked_products = _normalize_feedback_products(data.get("disliked_products"))
         people_profiles = _normalize_people_profiles(data.get("people_profiles"))
         active_profile_id = str(data.get("active_profile_id") or "").strip()
         previous_queries = data.get("previous_queries")
         previous_products_by_query = _normalize_products_by_query(data.get("previous_products_by_query"))
         if not isinstance(gift_context, dict):
             gift_context = None
+        if gift_context is None:
+            gift_context = {}
+        if liked_products:
+            gift_context["liked_products"] = liked_products
+        if disliked_products:
+            gift_context["disliked_products"] = disliked_products
         # Resolve active person profile and context for this turn.
         effective_input_context, active_profile_id, people_profiles = _build_effective_input_context(
             people_profiles=people_profiles,
@@ -1399,6 +1432,8 @@ def gift_advisor_chat():
                         "budget_min": ctx.get("budget_min"),
                         "budget_max": ctx.get("budget_max"),
                         "interests": ctx.get("interests"),
+                        "liked_products": [x.get("title") for x in (ctx.get("liked_products") or []) if isinstance(x, dict)][:5],
+                        "disliked_products": [x.get("title") for x in (ctx.get("disliked_products") or []) if isinstance(x, dict)][:5],
                     }
                 )
             context_bits.append(f"people_profiles={json.dumps(profile_summary, ensure_ascii=False)}")

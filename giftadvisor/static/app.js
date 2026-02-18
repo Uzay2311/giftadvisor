@@ -15,6 +15,7 @@
   const occasionEl = app.querySelector('[data-ga-occasion]');
   const chipsEl = app.querySelector('[data-ga-chips]');
   const budgetChipsEl = app.querySelector('[data-ga-budget-chips]');
+  let feedbackToastTimer = null;
 
   const ENDPOINT = '/gift_advisor';
   const DEVICE_ID_KEY = 'giftadvisor_device_id_v1';
@@ -33,6 +34,8 @@
   let messages = [];
   let activeProfileId = '';
   let peopleProfiles = null;
+  const likedProductsByProfile = new Map();
+  const dislikedProductsByProfile = new Map();
 
   function createLocalDeviceId() {
     try {
@@ -119,7 +122,7 @@
     return INITIAL_ASSISTANT_MESSAGES[idx];
   }
 
-  async function typeAssistantText(el, text, cps = ASSISTANT_TYPING_CPS) {
+  async function typeAssistantText(el, text, cps = ASSISTANT_TYPING_CPS, scrollMode = 'page') {
     if (!el) return;
     const full = normalize(stripSearchQueriesFromReply(stripJsonReply(text)));
     if (!full) {
@@ -131,7 +134,13 @@
     el.textContent = '';
     for (let i = 1; i <= full.length; i++) {
       el.textContent = full.slice(0, i);
-      if (i % 3 === 0 || i === full.length) scrollToBottom();
+      if (i % 3 === 0 || i === full.length) {
+        if (scrollMode === 'messages' && messagesEl) {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        } else {
+          scrollToBottom();
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, stepMs));
     }
   }
@@ -147,10 +156,10 @@
     textEl.className = 'ga-reply';
     textEl.style.whiteSpace = 'pre-wrap';
     bubble.appendChild(textEl);
-    typeAssistantText(textEl, getInitialAssistantMessage()).then(() => {
+    typeAssistantText(textEl, getInitialAssistantMessage(), ASSISTANT_TYPING_CPS, 'messages').then(() => {
       textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
     });
-    scheduleAutoScroll();
+    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
   function normalize(text) {
@@ -246,12 +255,92 @@
     return html;
   }
 
+  function _feedbackProfileKey() {
+    return String(activeProfileId || 'default').trim() || 'default';
+  }
+
+  function _normalizeFeedbackProduct(product) {
+    const title = String((product && product.title) || '').replace(/\s+/g, ' ').trim();
+    const price = String((product && product.price) || '').trim();
+    if (!title) return null;
+    return { title, price };
+  }
+
+  function _feedbackTitleKey(title) {
+    return String(title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function _getFeedbackList(mapObj, key) {
+    const arr = mapObj.get(key);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function _setFeedbackList(mapObj, key, arr) {
+    mapObj.set(key, Array.isArray(arr) ? arr.slice(0, 30) : []);
+  }
+
+  function _getCurrentFeedbackForProduct(product) {
+    const p = _normalizeFeedbackProduct(product);
+    if (!p) return { liked: false, disliked: false };
+    const key = _feedbackProfileKey();
+    const tkey = _feedbackTitleKey(p.title);
+    const liked = _getFeedbackList(likedProductsByProfile, key).some((x) => _feedbackTitleKey(x.title) === tkey);
+    const disliked = _getFeedbackList(dislikedProductsByProfile, key).some((x) => _feedbackTitleKey(x.title) === tkey);
+    return { liked, disliked };
+  }
+
+  function _toggleProductFeedback(product, reaction) {
+    const p = _normalizeFeedbackProduct(product);
+    if (!p) return { liked: false, disliked: false };
+    const key = _feedbackProfileKey();
+    const tkey = _feedbackTitleKey(p.title);
+    let liked = _getFeedbackList(likedProductsByProfile, key).filter((x) => _feedbackTitleKey(x.title) !== tkey);
+    let disliked = _getFeedbackList(dislikedProductsByProfile, key).filter((x) => _feedbackTitleKey(x.title) !== tkey);
+    const current = _getCurrentFeedbackForProduct(p);
+    if (reaction === 'like') {
+      if (!current.liked) liked.unshift(p);
+    } else if (reaction === 'dislike') {
+      if (!current.disliked) disliked.unshift(p);
+    }
+    _setFeedbackList(likedProductsByProfile, key, liked);
+    _setFeedbackList(dislikedProductsByProfile, key, disliked);
+    return _getCurrentFeedbackForProduct(p);
+  }
+
+  function _getFeedbackPayloadForActiveProfile() {
+    const key = _feedbackProfileKey();
+    return {
+      liked_products: _getFeedbackList(likedProductsByProfile, key).slice(0, 20),
+      disliked_products: _getFeedbackList(dislikedProductsByProfile, key).slice(0, 20),
+    };
+  }
+
+  function showFeedbackToast(text) {
+    if (!app) return;
+    let toast = app.querySelector('[data-ga-feedback-toast]');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'ga-feedback-toast';
+      toast.setAttribute('data-ga-feedback-toast', '1');
+      toast.setAttribute('aria-live', 'polite');
+      app.appendChild(toast);
+    }
+    toast.textContent = String(text || '').trim() || 'Saved preference';
+    toast.classList.add('is-visible');
+    if (feedbackToastTimer) clearTimeout(feedbackToastTimer);
+    feedbackToastTimer = setTimeout(() => {
+      toast.classList.remove('is-visible');
+    }, 950);
+  }
+
   function renderProductCard(product) {
-    const card = document.createElement('a');
+    const card = document.createElement('div');
     card.className = 'ga-product';
-    card.href = product.link || '#';
-    card.target = '_blank';
-    card.rel = 'noopener noreferrer';
+    const link = document.createElement('a');
+    link.className = 'ga-product__link';
+    link.href = product.link || '#';
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
 
     const imgWrap = document.createElement('div');
     imgWrap.className = 'ga-product__img-wrap';
@@ -269,7 +358,7 @@
       img.innerHTML = '<span class="ga-product__placeholder">No image</span>';
     }
     imgWrap.appendChild(img);
-    card.appendChild(imgWrap);
+    link.appendChild(imgWrap);
 
     const body = document.createElement('div');
     body.className = 'ga-product__body';
@@ -299,7 +388,57 @@
     price.className = 'ga-product__price';
     price.textContent = product.price || '';
     body.appendChild(price);
-    card.appendChild(body);
+    link.appendChild(body);
+    card.appendChild(link);
+
+    const actions = document.createElement('div');
+    actions.className = 'ga-product__actions';
+    const upBtn = document.createElement('button');
+    upBtn.type = 'button';
+    upBtn.className = 'ga-feedback ga-feedback--up';
+    upBtn.setAttribute('aria-label', 'Like this product');
+    upBtn.title = 'Like this';
+    upBtn.textContent = '👍';
+    const downBtn = document.createElement('button');
+    downBtn.type = 'button';
+    downBtn.className = 'ga-feedback ga-feedback--down';
+    downBtn.setAttribute('aria-label', 'Dislike this product');
+    downBtn.title = 'Dislike this';
+    downBtn.textContent = '👎';
+
+    function applyFeedbackUI() {
+      const state = _getCurrentFeedbackForProduct(product);
+      upBtn.classList.toggle('is-active', !!state.liked);
+      downBtn.classList.toggle('is-active', !!state.disliked);
+      upBtn.setAttribute('aria-pressed', state.liked ? 'true' : 'false');
+      downBtn.setAttribute('aria-pressed', state.disliked ? 'true' : 'false');
+    }
+    upBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const before = _getCurrentFeedbackForProduct(product);
+      _toggleProductFeedback(product, 'like');
+      const after = _getCurrentFeedbackForProduct(product);
+      applyFeedbackUI();
+      if (after.liked && !before.liked) showFeedbackToast('Liked');
+      else if (!after.liked && before.liked) showFeedbackToast('Like removed');
+      else if (after.liked && before.disliked) showFeedbackToast('Switched to like');
+    });
+    downBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const before = _getCurrentFeedbackForProduct(product);
+      _toggleProductFeedback(product, 'dislike');
+      const after = _getCurrentFeedbackForProduct(product);
+      applyFeedbackUI();
+      if (after.disliked && !before.disliked) showFeedbackToast('Disliked');
+      else if (!after.disliked && before.disliked) showFeedbackToast('Dislike removed');
+      else if (after.disliked && before.liked) showFeedbackToast('Switched to dislike');
+    });
+    actions.appendChild(upBtn);
+    actions.appendChild(downBtn);
+    card.appendChild(actions);
+    applyFeedbackUI();
     return card;
   }
 
@@ -407,12 +546,21 @@
     if (Number.isFinite(selectedBudget.max)) {
       giftContext.budget_max = selectedBudget.max;
     }
+    const feedback = _getFeedbackPayloadForActiveProfile();
+    if (feedback.liked_products.length > 0) {
+      giftContext.liked_products = feedback.liked_products;
+    }
+    if (feedback.disliked_products.length > 0) {
+      giftContext.disliked_products = feedback.disliked_products;
+    }
     return {
       gift_context: giftContext,
       previous_queries: previousQueries,
       previous_products_by_query: previousProductsByQuery,
       people_profiles: latestPeopleProfiles || undefined,
       active_profile_id: latestActiveProfileId || undefined,
+      liked_products: feedback.liked_products,
+      disliked_products: feedback.disliked_products,
     };
   }
 
@@ -422,7 +570,7 @@
       .map((m) => ({ role: m.role, content: m.content }))
       .slice(-16);
 
-    const { gift_context, previous_queries, previous_products_by_query, people_profiles, active_profile_id } = getAccumulatedContext();
+    const { gift_context, previous_queries, previous_products_by_query, people_profiles, active_profile_id, liked_products, disliked_products } = getAccumulatedContext();
     const payload = {
       message: msg,
       history,
@@ -435,6 +583,8 @@
       active_profile_id,
       previous_queries: previous_queries.length > 0 ? previous_queries : undefined,
       previous_products_by_query: previous_products_by_query.length > 0 ? previous_products_by_query : undefined,
+      liked_products: liked_products.length > 0 ? liked_products : undefined,
+      disliked_products: disliked_products.length > 0 ? disliked_products : undefined,
       stream: true,
     };
 
