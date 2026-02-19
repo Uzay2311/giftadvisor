@@ -536,39 +536,48 @@
     return { row, bubble };
   }
 
+  // Returns the element that is actually scrolling (scrollEl if constrained, else window).
+  function _getScrollTarget() {
+    if (scrollEl && scrollEl.scrollHeight > scrollEl.clientHeight + 4) return scrollEl;
+    return null; // fall back to window
+  }
+
   function isNearBottom() {
-    if (!scrollEl) return true;
-    const threshold = 24;
-    const remaining = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
-    return remaining <= threshold;
+    const threshold = 48;
+    const target = _getScrollTarget();
+    if (target) {
+      return target.scrollHeight - target.scrollTop - target.clientHeight <= threshold;
+    }
+    return document.body.scrollHeight - window.scrollY - window.innerHeight <= threshold;
   }
 
   function scrollToBottom(force = false) {
-    if (!scrollEl) return;
     const inputFocused = !!inputEl && document.activeElement === inputEl;
     if (!force && !stickToBottom && !inputFocused) return;
-    scrollEl.scrollTop = scrollEl.scrollHeight;
+    const target = _getScrollTarget();
+    if (target) {
+      target.scrollTop = target.scrollHeight;
+    } else {
+      window.scrollTo(0, document.body.scrollHeight);
+    }
   }
 
   function scheduleAutoScroll(force = false) {
     scrollToBottom(force);
     requestAnimationFrame(() => scrollToBottom(force));
-    setTimeout(() => scrollToBottom(force), 120);
-    setTimeout(() => scrollToBottom(force), 400);
+    setTimeout(() => scrollToBottom(force), 150);
+    setTimeout(() => scrollToBottom(force), 450);
   }
 
-  if (scrollEl) {
-    scrollEl.addEventListener('scroll', () => {
+  // Listen on both scrollEl and window — on mobile body often does the scrolling.
+  const _scrollListeners = [scrollEl, window].filter(Boolean);
+  _scrollListeners.forEach((el) => {
+    el.addEventListener('scroll', () => {
       stickToBottom = isNearBottom();
     }, { passive: true });
-    // If user manually scrolls, stop sticky behavior immediately.
-    scrollEl.addEventListener('wheel', () => {
-      stickToBottom = false;
-    }, { passive: true });
-    scrollEl.addEventListener('touchmove', () => {
-      stickToBottom = false;
-    }, { passive: true });
-  }
+  });
+  window.addEventListener('wheel', () => { stickToBottom = false; }, { passive: true });
+  window.addEventListener('touchmove', () => { stickToBottom = false; }, { passive: true });
 
   if (inputEl) {
     inputEl.addEventListener('focus', () => {

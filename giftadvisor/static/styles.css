@@ -718,8 +718,13 @@ body {
 
   .ga-chat__center {
     padding: 0.55rem 0.5rem 0;
-    padding-bottom: calc(8rem + env(safe-area-inset-bottom));
+    padding-bottom: 0.5rem;
     gap: 0.55rem;
+  }
+
+  /* Push the page bottom below the fixed composer so last message is never hidden. */
+  .ga-app {
+    padding-bottom: calc(7rem + env(safe-area-inset-bottom));
   }
 
   .ga-occasion {
