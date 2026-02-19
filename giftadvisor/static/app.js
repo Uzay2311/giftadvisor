@@ -41,6 +41,10 @@
   const likedProductsByProfile = new Map();
   const dislikedProductsByProfile = new Map();
 
+  function syncComposerOffsetVar() {
+    // No-op — bottom clearance handled by CSS padding.
+  }
+
   function createLocalDeviceId() {
     try {
       if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -390,8 +394,8 @@
       imgEl.src = product.image;
       imgEl.alt = product.title || 'Product';
       imgEl.loading = 'lazy';
-      imgEl.addEventListener('load', () => scrollToBottom());
-      imgEl.addEventListener('error', () => scrollToBottom());
+      imgEl.addEventListener('load', () => { if (stickToBottom) scrollToBottom(true); });
+      imgEl.addEventListener('error', () => { if (stickToBottom) scrollToBottom(true); });
       img.appendChild(imgEl);
     } else {
       img.innerHTML = '<span class="ga-product__placeholder">No image</span>';
@@ -528,7 +532,7 @@
     }
 
     messagesEl.appendChild(row);
-    scrollToBottom();
+    scheduleAutoScroll(true);
     return { row, bubble };
   }
 
@@ -544,20 +548,13 @@
     const inputFocused = !!inputEl && document.activeElement === inputEl;
     if (!force && !stickToBottom && !inputFocused) return;
     scrollEl.scrollTop = scrollEl.scrollHeight;
-    if (formEl) {
-      const rect = formEl.getBoundingClientRect();
-      const viewportH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      const isOutOfView = rect.bottom > viewportH || rect.top < 0;
-      if (isOutOfView && (force || inputFocused || stickToBottom)) {
-        formEl.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
-      }
-    }
   }
 
   function scheduleAutoScroll(force = false) {
     scrollToBottom(force);
     requestAnimationFrame(() => scrollToBottom(force));
     setTimeout(() => scrollToBottom(force), 120);
+    setTimeout(() => scrollToBottom(force), 400);
   }
 
   if (scrollEl) {
@@ -578,6 +575,19 @@
       stickToBottom = true;
       scheduleAutoScroll(true);
     });
+  }
+
+  syncComposerOffsetVar();
+  window.addEventListener('resize', () => syncComposerOffsetVar(), { passive: true });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => syncComposerOffsetVar(), { passive: true });
+  }
+  if (typeof ResizeObserver !== 'undefined' && formEl) {
+    const composerEl = formEl.closest('.ga-composer');
+    if (composerEl) {
+      const ro = new ResizeObserver(() => syncComposerOffsetVar());
+      ro.observe(composerEl);
+    }
   }
 
   function getAccumulatedContext() {
@@ -854,7 +864,7 @@
           if (finalPayload.people_profiles && typeof finalPayload.people_profiles === 'object') {
             peopleProfiles = finalPayload.people_profiles;
           }
-          scheduleAutoScroll();
+          scheduleAutoScroll(true);
         },
         (loadingPayload) => {
           if (loadingPayload && loadingPayload.queries && loadingPayload.queries.length > 0) {
@@ -863,7 +873,7 @@
               ? 'Searching best options'
               : 'Choosing the best options';
             renderLoadingState(msg);
-            scheduleAutoScroll();
+            scheduleAutoScroll(true);
           }
         }
       );
