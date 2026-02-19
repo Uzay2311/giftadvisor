@@ -160,11 +160,7 @@
     const full = normalize(stripSearchQueriesFromReply(stripJsonReply(text)));
     if (!animate) {
       el.textContent = full || '';
-      if (scrollMode === 'messages' && scrollEl) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
-      } else {
-        scrollToBottom(true);
-      }
+      if (scrollMode !== 'none') scrollToBottom(true);
       return;
     }
     const safe = full || '';
@@ -173,36 +169,19 @@
     el.textContent = '';
     for (let i = 1; i <= safe.length; i++) {
       el.textContent = safe.slice(0, i);
-      if (scrollMode === 'messages' && scrollEl) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
-      } else {
-        scrollToBottom(true);
-      }
+      if (scrollMode !== 'none') scrollToBottom(true);
       await new Promise((resolve) => setTimeout(resolve, stepMs));
     }
   }
 
   function renderInitialAssistantMessage() {
-    if (!messagesEl) return;
-    if (heroEl) heroEl.classList.add('is-hidden');
-    const { row, bubble } = renderMessage('assistant', '', false, null, true /* noScroll */);
-    bubble.innerHTML = '';
-    const textEl = document.createElement('div');
-    textEl.className = 'ga-reply';
-    textEl.style.whiteSpace = 'pre-wrap';
-    bubble.appendChild(textEl);
-    typeAssistantText(textEl, getInitialAssistantMessage(), 'messages', true, 86).then(() => {
-      textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
-      // After animation, measure actual positions and scroll just enough to clear the composer.
-      requestAnimationFrame(() => {
-        const composerEl = formEl && formEl.closest('.ga-composer');
-        if (!composerEl || !row) return;
-        const rowBottom = row.getBoundingClientRect().bottom;
-        const composerTop = composerEl.getBoundingClientRect().top;
-        const overlap = rowBottom - composerTop + 10; // 10px gap
-        if (overlap > 0) window.scrollBy(0, overlap);
-      });
-    });
+    if (!heroEl) return;
+    // Show hero (not hidden), hide messages area until user sends first message.
+    heroEl.classList.remove('is-hidden');
+    const heroTextEl = heroEl.querySelector('[data-ga-hero-text]');
+    if (heroTextEl) {
+      typeAssistantText(heroTextEl, getInitialAssistantMessage(), 'none', true, 86);
+    }
   }
 
   function normalize(text) {

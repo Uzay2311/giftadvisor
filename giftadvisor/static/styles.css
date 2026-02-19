@@ -165,15 +165,25 @@ body {
   color: white;
 }
 
-/* Hero */
+/* Hero — centered welcome, shown before any messages */
 .ga-hero {
-  padding: 1rem 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1.5rem;
+  text-align: center;
 }
 
-.ga-hero__text {
+.ga-hero__tagline {
   margin: 0;
-  font-size: 1rem;
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 400;
+  font-style: italic;
   color: var(--text-muted);
+  line-height: 1.5;
+  max-width: 26ch;
 }
 
 .ga-hero.is-hidden {
@@ -751,8 +761,7 @@ body {
   }
 
   .ga-messages {
-    /* Push first message above the fixed composer: 100dvh - header(~75) - pads(~15) - composer(~70) - gap(~20) */
-    min-height: calc(100dvh - 180px);
+    min-height: 0;
   }
 
   .ga-composer {
