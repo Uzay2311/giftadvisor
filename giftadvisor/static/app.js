@@ -535,30 +535,17 @@
     return { row, bubble };
   }
 
-  // Returns the element that is actually scrolling (scrollEl if constrained, else window).
-  function _getScrollTarget() {
-    if (scrollEl && scrollEl.scrollHeight > scrollEl.clientHeight + 4) return scrollEl;
-    return null; // fall back to window
-  }
-
   function isNearBottom() {
+    if (!scrollEl) return true;
     const threshold = 48;
-    const target = _getScrollTarget();
-    if (target) {
-      return target.scrollHeight - target.scrollTop - target.clientHeight <= threshold;
-    }
-    return document.body.scrollHeight - window.scrollY - window.innerHeight <= threshold;
+    return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <= threshold;
   }
 
   function scrollToBottom(force = false) {
+    if (!scrollEl) return;
     const inputFocused = !!inputEl && document.activeElement === inputEl;
     if (!force && !stickToBottom && !inputFocused) return;
-    const target = _getScrollTarget();
-    if (target) {
-      target.scrollTop = target.scrollHeight;
-    } else {
-      window.scrollTo(0, document.body.scrollHeight);
-    }
+    scrollEl.scrollTop = scrollEl.scrollHeight;
   }
 
   function scheduleAutoScroll(force = false) {
@@ -568,15 +555,13 @@
     setTimeout(() => scrollToBottom(force), 450);
   }
 
-  // Listen on both scrollEl and window — on mobile body often does the scrolling.
-  const _scrollListeners = [scrollEl, window].filter(Boolean);
-  _scrollListeners.forEach((el) => {
-    el.addEventListener('scroll', () => {
+  if (scrollEl) {
+    scrollEl.addEventListener('scroll', () => {
       stickToBottom = isNearBottom();
     }, { passive: true });
-  });
-  window.addEventListener('wheel', () => { stickToBottom = false; }, { passive: true });
-  window.addEventListener('touchmove', () => { stickToBottom = false; }, { passive: true });
+    scrollEl.addEventListener('wheel', () => { stickToBottom = false; }, { passive: true });
+    scrollEl.addEventListener('touchmove', () => { stickToBottom = false; }, { passive: true });
+  }
 
   if (inputEl) {
     inputEl.addEventListener('focus', () => {

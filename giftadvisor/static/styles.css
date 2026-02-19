@@ -707,21 +707,62 @@ body {
     font-size: 0.8rem;
   }
 
+  /*
+   * Constrained app layout on mobile so .ga-chat__center is the scroll container.
+   * The composer sits as a natural sibling below it — no position:fixed needed.
+   * This is the only reliable way to ensure the last message is never hidden.
+   */
+  html, body {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .ga-app {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
   .ga-main {
-    padding: 0.2rem;
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+    overflow: hidden;
   }
 
   .ga-chat {
+    flex: 1;
+    min-height: 0;
     max-width: none;
-    min-height: unset;
-    /* Clearance below last message so it never hides behind the fixed composer. */
-    padding-bottom: calc(4.5rem + env(safe-area-inset-bottom));
+    border-radius: 0;
+    box-shadow: none;
+    overflow: hidden;
+    padding-bottom: 0;
+  }
+
+  .ga-chat__shell {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .ga-chat__center {
-    padding: 0.55rem 0.5rem 0;
-    padding-bottom: 0.5rem;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0.55rem 0.5rem 0.5rem;
     gap: 0.55rem;
+  }
+
+  .ga-messages {
+    min-height: 0;
+  }
+
+  /* Composer: normal flow at bottom of shell, safe-area aware. */
+  .ga-composer {
+    position: static;
+    padding: 0.55rem 0.5rem calc(0.9rem + env(safe-area-inset-bottom));
+    box-shadow: 0 -4px 16px rgba(26, 26, 26, 0.06);
   }
 
   .ga-occasion {
@@ -748,20 +789,5 @@ body {
 
   .ga-feedback-toast {
     bottom: 82px;
-  }
-
-  .ga-messages {
-    /* Tall enough that first message (justify-content: flex-end) lands above the fixed composer. */
-    min-height: calc(100dvh - 130px);
-  }
-
-  .ga-composer {
-    position: fixed;
-    left: 0.2rem;
-    right: 0.2rem;
-    bottom: 0;
-    z-index: 14;
-    padding: 0.55rem 0.5rem calc(0.9rem + env(safe-area-inset-bottom));
-    box-shadow: 0 -4px 16px rgba(26, 26, 26, 0.06);
   }
 }
