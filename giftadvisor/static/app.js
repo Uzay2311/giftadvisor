@@ -11,6 +11,7 @@
   const inputEl = app.querySelector('[data-ga-input]');
   const sendBtn = app.querySelector('[data-ga-send]');
   const chatEl = app.querySelector('.ga-chat');
+  const scrollEl = app.querySelector('.ga-chat__center') || messagesEl;
   const heroEl = app.querySelector('[data-ga-hero]');
   const occasionEl = app.querySelector('[data-ga-occasion]');
   const chipsEl = app.querySelector('[data-ga-chips]');
@@ -39,12 +40,6 @@
   let stickToBottom = true;
   const likedProductsByProfile = new Map();
   const dislikedProductsByProfile = new Map();
-
-  function syncViewportHeightVar() {
-    const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-    const safe = Math.max(320, Math.round(vh || 0));
-    document.documentElement.style.setProperty('--ga-vh', safe + 'px');
-  }
 
   function createLocalDeviceId() {
     try {
@@ -161,8 +156,8 @@
     const full = normalize(stripSearchQueriesFromReply(stripJsonReply(text)));
     if (!animate) {
       el.textContent = full || '';
-      if (scrollMode === 'messages' && messagesEl) {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (scrollMode === 'messages' && scrollEl) {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
       } else {
         scrollToBottom(true);
       }
@@ -174,8 +169,8 @@
     el.textContent = '';
     for (let i = 1; i <= safe.length; i++) {
       el.textContent = safe.slice(0, i);
-      if (scrollMode === 'messages' && messagesEl) {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (scrollMode === 'messages' && scrollEl) {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
       } else {
         scrollToBottom(true);
       }
@@ -195,7 +190,7 @@
     typeAssistantText(textEl, getInitialAssistantMessage(), 'messages', true, 86).then(() => {
       textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
     });
-    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
   }
 
   function normalize(text) {
@@ -538,52 +533,50 @@
   }
 
   function isNearBottom() {
-    if (!messagesEl) return true;
-    const threshold = 56;
-    const remaining = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    if (!scrollEl) return true;
+    const threshold = 24;
+    const remaining = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
     return remaining <= threshold;
   }
 
   function scrollToBottom(force = false) {
-    if (!messagesEl) return;
+    if (!scrollEl) return;
     const inputFocused = !!inputEl && document.activeElement === inputEl;
     if (!force && !stickToBottom && !inputFocused) return;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollEl.scrollTop = scrollEl.scrollHeight;
     if (formEl) {
       const rect = formEl.getBoundingClientRect();
       const viewportH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
       const isOutOfView = rect.bottom > viewportH || rect.top < 0;
-      if (isOutOfView || force || inputFocused) {
+      if (isOutOfView && (force || inputFocused || stickToBottom)) {
         formEl.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
       }
     }
   }
 
   function scheduleAutoScroll(force = false) {
-    syncViewportHeightVar();
     scrollToBottom(force);
     requestAnimationFrame(() => scrollToBottom(force));
     setTimeout(() => scrollToBottom(force), 120);
   }
 
-  if (messagesEl) {
-    messagesEl.addEventListener('scroll', () => {
+  if (scrollEl) {
+    scrollEl.addEventListener('scroll', () => {
       stickToBottom = isNearBottom();
+    }, { passive: true });
+    // If user manually scrolls, stop sticky behavior immediately.
+    scrollEl.addEventListener('wheel', () => {
+      stickToBottom = false;
+    }, { passive: true });
+    scrollEl.addEventListener('touchmove', () => {
+      stickToBottom = false;
     }, { passive: true });
   }
 
-  syncViewportHeightVar();
-  window.addEventListener('resize', () => scheduleAutoScroll(false), { passive: true });
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', () => scheduleAutoScroll(false), { passive: true });
-  }
   if (inputEl) {
     inputEl.addEventListener('focus', () => {
-      // Mobile keyboards resize viewport asynchronously.
       stickToBottom = true;
       scheduleAutoScroll(true);
-      setTimeout(() => scheduleAutoScroll(true), 120);
-      setTimeout(() => scheduleAutoScroll(true), 260);
     });
   }
 

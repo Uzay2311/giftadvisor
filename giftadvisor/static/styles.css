@@ -2,7 +2,6 @@
 /* Inspired by havanora-shopify, gift-focused aesthetic */
 
 :root {
-  --ga-vh: 100vh;
   --bg: #faf9f7;
   --bg-card: #ffffff;
   --text: #1a1a1a;
@@ -714,8 +713,7 @@ body {
 
   .ga-chat {
     max-width: none;
-    height: calc(var(--ga-vh, 100dvh) - 148px);
-    min-height: 420px;
+    min-height: calc(100dvh - 132px);
   }
 
   .ga-chat__center {
