@@ -307,6 +307,7 @@ RULES (VERY IMPORTANT):
 23. When enough context is already known, avoid repetitive clarification loops; move the conversation forward with a concrete action choice.
 24. If the user switches recipient/person (e.g., "for my wife", "let's move to my son", "that was for my son"), pivot immediately to that person. Do NOT carry prior person's interests/product as confirmed facts; ask one focused discovery question for the new person unless that profile already has enough context.
 25. Do NOT claim curated products, direct seller links, or specific store listings unless you are also returning search_strategy to trigger real product retrieval. If search_strategy is null, keep the reply conversational and ask the next focused question/action.
+26. Avoid vague filler follow-ups like "Could you share a bit more detail?". Ask a concrete, context-aware next question that references known recipient/product constraints.
 """.strip()
 
 PRODUCT_RANKER_PROMPT = """
@@ -318,6 +319,7 @@ Task:
 - If context contains liked_products/disliked_products, prefer items similar to liked ones and penalize items similar to disliked ones.
 - Reliability signals to prefer: higher rating, higher reviews, and stronger bought_last_month.
 - Avoid repetition: do NOT select near-duplicate products that are very similar in title/description/specs (e.g., same model with only minor variant differences) unless unique options are unavailable.
+- Treat the same underlying listing as a duplicate even when title formatting differs (prefix/suffix changes, reordered words, minor punctuation differences, or repeated model names).
 - Deprioritize bulk/commercial listings (e.g., multi-pack classroom sets, wholesale packs, institutional bundles, large quantity lots) unless the user explicitly asks for bulk quantities.
 - Reject obvious mismatches (e.g., infant/kids products when recipient is an adult wife/woman) unless explicitly requested.
 - Prefer category diversity when multiple query categories are present; avoid selecting all products from one category unless clearly superior.
@@ -633,6 +635,28 @@ def _normalize_history(history, max_turns=16):
     return out[-max_turns:]
 
 
+def _canonical_product_key(title: str, link: str) -> str:
+    """Build a stable key for deduping the same listing across title variants."""
+    t = re.sub(r"\s+", " ", str(title or "").strip().lower())
+    l = str(link or "").strip().lower()
+    if l:
+        m = re.search(r"/(?:dp|gp/product)/([a-z0-9]{10})(?:[/?]|$)", l)
+        if m:
+            return f"asin:{m.group(1)}"
+        m = re.search(r"[?&]asin=([a-z0-9]{10})(?:[&#]|$)", l)
+        if m:
+            return f"asin:{m.group(1)}"
+        base = re.sub(r"^https?://", "", l)
+        base = re.sub(r"[?#].*$", "", base).rstrip("/")
+        if base:
+            return f"link:{base}"
+    if t:
+        norm_t = re.sub(r"[^a-z0-9]+", " ", t)
+        norm_t = re.sub(r"\s{2,}", " ", norm_t).strip()
+        return f"title:{norm_t}"
+    return ""
+
+
 def _flatten_product_candidates(raw_results: list, max_candidates: int = 1000) -> list:
     """Flatten and dedupe products from all query result buckets."""
     if not isinstance(raw_results, list):
@@ -648,7 +672,7 @@ def _flatten_product_candidates(raw_results: list, max_candidates: int = 1000) -
                 continue
             title = (p.get("title") or "").strip()
             link = (p.get("link") or "").strip()
-            key = (title.lower() or link.lower()).strip()
+            key = _canonical_product_key(title, link)
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -729,7 +753,10 @@ def _rank_products_with_llm(
         c = by_id.get(pid)
         if not c:
             continue
-        key = (c.get("title") or "").strip().lower()
+        key = _canonical_product_key(
+            c.get("title"),
+            ((c.get("product") or {}).get("link") if isinstance(c.get("product"), dict) else "") or "",
+        )
         if key and key in used:
             continue
         if key:
@@ -740,7 +767,10 @@ def _rank_products_with_llm(
 
     if len(chosen_candidates) < top_k:
         for c in candidates:
-            key = (c.get("title") or "").strip().lower()
+            key = _canonical_product_key(
+                c.get("title"),
+                ((c.get("product") or {}).get("link") if isinstance(c.get("product"), dict) else "") or "",
+            )
             if key and key in used:
                 continue
             if key:
@@ -754,14 +784,24 @@ def _rank_products_with_llm(
     pool_queries = {str(c.get("query") or "").strip() for c in candidates if str(c.get("query") or "").strip()}
     picked_queries = {str(c.get("query") or "").strip() for c in chosen_candidates if str(c.get("query") or "").strip()}
     if len(pool_queries) >= 2 and len(picked_queries) < 2 and len(chosen_candidates) >= 2:
-        used_titles = {(c.get("title") or "").strip().lower() for c in chosen_candidates if (c.get("title") or "").strip()}
+        used_titles = {
+            _canonical_product_key(
+                c.get("title"),
+                ((c.get("product") or {}).get("link") if isinstance(c.get("product"), dict) else "") or "",
+            )
+            for c in chosen_candidates
+        }
+        used_titles.discard("")
         missing_queries = [q for q in pool_queries if q not in picked_queries]
         replacement = None
         for mq in missing_queries:
             for c in candidates:
                 if str(c.get("query") or "").strip() != mq:
                     continue
-                t = (c.get("title") or "").strip().lower()
+                t = _canonical_product_key(
+                    c.get("title"),
+                    ((c.get("product") or {}).get("link") if isinstance(c.get("product"), dict) else "") or "",
+                )
                 if t and t in used_titles:
                     continue
                 replacement = c
@@ -826,8 +866,11 @@ def _rank_products_by_sections(
         seen = set()
         for c in row_candidates + global_candidates:
             cid = str(c.get("id") or "")
-            title = (c.get("title") or "").strip().lower()
-            key = cid or title
+            key = _canonical_product_key(
+                c.get("title"),
+                ((c.get("product") or {}).get("link") if isinstance(c.get("product"), dict) else "") or "",
+            )
+            key = cid or key
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -848,21 +891,19 @@ def _rank_products_by_sections(
         # Enforce strict section integrity: keep only products that belong to this query bucket.
         row_keys = set()
         for rc in row_candidates:
-            t = (rc.get("title") or "").strip().lower()
-            l = ((rc.get("product") or {}).get("link") or "").strip().lower()
-            if t:
-                row_keys.add(("t", t))
-            if l:
-                row_keys.add(("l", l))
+            key = _canonical_product_key(
+                rc.get("title"),
+                ((rc.get("product") or {}).get("link") if isinstance(rc.get("product"), dict) else "") or "",
+            )
+            if key:
+                row_keys.add(key)
         strict_ranked = []
         used_keys = set()
         for p in ranked or []:
-            t = (p.get("title") or "").strip().lower()
-            l = (p.get("link") or "").strip().lower()
-            in_row = (("t", t) in row_keys) or (("l", l) in row_keys)
+            key = _canonical_product_key(p.get("title"), p.get("link"))
+            in_row = key in row_keys
             if not in_row:
                 continue
-            key = ("t", t) if t else ("l", l)
             if key in used_keys:
                 continue
             used_keys.add(key)
@@ -873,9 +914,7 @@ def _rank_products_by_sections(
         if len(strict_ranked) < top_k:
             for rc in row_candidates:
                 p = rc.get("product") or {}
-                t = (p.get("title") or "").strip().lower()
-                l = (p.get("link") or "").strip().lower()
-                key = ("t", t) if t else ("l", l)
+                key = _canonical_product_key(p.get("title"), p.get("link"))
                 if key in used_keys:
                     continue
                 used_keys.add(key)
@@ -905,7 +944,24 @@ def _rank_products_by_sections(
             if section:
                 sections_by_idx[idx] = section
 
-    return [sections_by_idx[i] for i in sorted(sections_by_idx.keys())]
+    ordered = [sections_by_idx[i] for i in sorted(sections_by_idx.keys())]
+    # Final guard: no duplicate listing across sections.
+    seen_global = set()
+    for section in ordered:
+        products = section.get("products") if isinstance(section, dict) else []
+        if not isinstance(products, list):
+            continue
+        unique_products = []
+        for p in products:
+            if not isinstance(p, dict):
+                continue
+            key = _canonical_product_key(p.get("title"), p.get("link"))
+            if not key or key in seen_global:
+                continue
+            seen_global.add(key)
+            unique_products.append(p)
+        section["products"] = unique_products
+    return [s for s in ordered if (s.get("products") if isinstance(s, dict) else [])]
 
 
 def _safe_json_loads(s: str):
@@ -1112,6 +1168,7 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
         return reply
 
     import re
+    original = _compact_ui_text(reply or "")
     text = (reply or "").strip()
     if not text:
         return text
@@ -1175,42 +1232,17 @@ def _avoid_reasking_known_fields(reply: str, gift_context: Optional[dict]) -> st
     if text and text[-1] not in ".!?":
         text = text + "."
 
-    return _compact_ui_text(text)
+    cleaned = _compact_ui_text(text)
+    # If cleanup became too aggressive and removed meaning, keep LLM's original wording.
+    return cleaned or original
 
 
 def _ensure_next_step(reply: str, gift_context: Optional[dict], has_products: bool = False) -> str:
-    """Light safety net to avoid dead-end turns while keeping LLM-led wording."""
+    """Minimal safety net: prefer LLM wording, only guard empty output."""
     text = _compact_ui_text(reply or "")
     if not text:
-        return "Could you share a bit more detail?"
-    if "?" in text:
-        return text
-
-    lower = text.lower()
-    looks_generic = bool(
-        re.search(
-            r"\b(this will help|thanks for sharing|perfect options|great now that i know)\b",
-            lower,
-            re.I,
-        )
-    )
-    looks_ack = bool(re.search(r"\b(thanks|thank you|glad|awesome|great|perfect)\b", lower, re.I))
-    very_short_statement = len(text.split()) <= 10
-    # Intervene only on likely dead-end statements.
-    needs_followup = bool(has_products or looks_generic or (looks_ack and very_short_statement))
-    if not needs_followup:
-        return text
-
-    ctx = gift_context if isinstance(gift_context, dict) else {}
-    has_recipient = bool(str(ctx.get("recipient") or "").strip())
-    has_occasion = bool(str(ctx.get("occasion") or "").strip())
-    has_budget = ctx.get("budget_min") is not None or ctx.get("budget_max") is not None
-    has_interest = bool(ctx.get("interests")) or bool(str(ctx.get("product") or "").strip())
-    if has_products:
-        return _compact_ui_text(f"{text} Would you like more options, or should I narrow it to one best pick?")
-    if has_recipient and has_occasion and has_budget and has_interest:
-        return _compact_ui_text(f"{text} Would you like me to search now or refine the gift type first?")
-    return _compact_ui_text(f"{text} What should we refine next: occasion, budget, or interests?")
+        return "I'd love to help—what would you like to refine next?"
+    return text
 
 
 def _reply_asks_for_info(reply: str) -> bool:

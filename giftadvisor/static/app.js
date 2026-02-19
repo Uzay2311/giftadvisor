@@ -39,6 +39,12 @@
   const likedProductsByProfile = new Map();
   const dislikedProductsByProfile = new Map();
 
+  function syncViewportHeightVar() {
+    const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    const safe = Math.max(320, Math.round(vh || 0));
+    document.documentElement.style.setProperty('--ga-vh', safe + 'px');
+  }
+
   function createLocalDeviceId() {
     try {
       if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -268,6 +274,14 @@
     if (num == null || num === '') return '';
     const n = parseInt(num, 10);
     if (isNaN(n)) return String(num);
+    if (n >= 1000000) {
+      const m = (n / 1000000).toFixed(1).replace(/\.0$/, '');
+      return m + 'M';
+    }
+    if (n >= 1000) {
+      const k = (n / 1000).toFixed(1).replace(/\.0$/, '');
+      return k + 'K';
+    }
     return n.toLocaleString();
   }
 
@@ -399,18 +413,24 @@
       const ratingRow = document.createElement('div');
       ratingRow.className = 'ga-product__rating';
       if (product.rating != null) {
-        const starsWrap = document.createElement('span');
-        starsWrap.className = 'ga-product__stars';
-        starsWrap.innerHTML = renderStars(product.rating);
-        ratingRow.appendChild(starsWrap);
+        const ratingValue = document.createElement('span');
+        ratingValue.className = 'ga-product__rating-value';
+        const rv = parseFloat(product.rating);
+        ratingValue.textContent = Number.isFinite(rv) ? rv.toFixed(1).replace(/\.0$/, '') : String(product.rating);
+        ratingRow.appendChild(ratingValue);
+
+        const starsText = document.createElement('span');
+        starsText.className = 'ga-product__stars-text';
+        const starsCount = Math.max(1, Math.min(5, Math.round(Number.isFinite(rv) ? rv : 5)));
+        starsText.textContent = '★'.repeat(starsCount);
+        ratingRow.appendChild(starsText);
       }
-      const ratingText = document.createElement('span');
-      ratingText.className = 'ga-product__rating-text';
-      const parts = [];
-      if (product.rating != null) parts.push(String(product.rating));
-      if (product.reviews != null) parts.push(formatReviews(product.reviews) + ' reviews');
-      ratingText.textContent = parts.join(' · ');
-      ratingRow.appendChild(ratingText);
+      if (product.reviews != null) {
+        const reviewsText = document.createElement('span');
+        reviewsText.className = 'ga-product__reviews-count';
+        reviewsText.textContent = '(' + formatReviews(product.reviews) + ')';
+        ratingRow.appendChild(reviewsText);
+      }
       body.appendChild(ratingRow);
     }
     const price = document.createElement('div');
@@ -519,21 +539,37 @@
   function scrollToBottom(force = false) {
     if (!messagesEl) return;
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    // Keep page anchored to latest content always.
-    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'auto' });
+    const inputFocused = !!inputEl && document.activeElement === inputEl;
     if (formEl) {
       const rect = formEl.getBoundingClientRect();
-      const isOutOfView = rect.bottom > window.innerHeight || rect.top < 0;
-      if (isOutOfView) {
+      const viewportH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+      const isOutOfView = rect.bottom > viewportH || rect.top < 0;
+      if (isOutOfView || force || inputFocused) {
         formEl.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
       }
     }
   }
 
   function scheduleAutoScroll(force = false) {
+    syncViewportHeightVar();
     scrollToBottom(force);
     requestAnimationFrame(() => scrollToBottom(force));
     setTimeout(() => scrollToBottom(force), 120);
+  }
+
+  syncViewportHeightVar();
+  window.addEventListener('resize', () => scheduleAutoScroll(false), { passive: true });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => scheduleAutoScroll(true), { passive: true });
+    window.visualViewport.addEventListener('scroll', () => scheduleAutoScroll(true), { passive: true });
+  }
+  if (inputEl) {
+    inputEl.addEventListener('focus', () => {
+      // Mobile keyboards resize viewport asynchronously.
+      scheduleAutoScroll(true);
+      setTimeout(() => scheduleAutoScroll(true), 120);
+      setTimeout(() => scheduleAutoScroll(true), 260);
+    });
   }
 
   function getAccumulatedContext() {

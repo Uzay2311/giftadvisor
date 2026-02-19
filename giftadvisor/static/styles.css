@@ -2,6 +2,7 @@
 /* Inspired by havanora-shopify, gift-focused aesthetic */
 
 :root {
+  --ga-vh: 100vh;
   --bg: #faf9f7;
   --bg-card: #ffffff;
   --text: #1a1a1a;
@@ -480,12 +481,27 @@ body {
 }
 
 .ga-product__rating {
-  font-size: 0.8rem;
-  color: var(--text-muted);
+  font-size: 0.82rem;
+  color: #262626;
   margin-top: 0.35rem;
   display: flex;
   align-items: center;
-  gap: 0.2rem;
+  gap: 0.18rem;
+}
+
+.ga-product__rating-value {
+  font-weight: 500;
+}
+
+.ga-product__stars-text {
+  color: #f28c1b;
+  letter-spacing: -0.02em;
+  font-size: 0.9em;
+}
+
+.ga-product__reviews-count {
+  color: #666;
+  margin-left: 0.05rem;
 }
 
 .ga-product__stars {
@@ -698,7 +714,8 @@ body {
 
   .ga-chat {
     max-width: none;
-    min-height: calc(100dvh - 132px);
+    height: calc(var(--ga-vh, 100dvh) - 148px);
+    min-height: 420px;
   }
 
   .ga-chat__center {
