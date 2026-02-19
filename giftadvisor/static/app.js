@@ -185,7 +185,7 @@
   function renderInitialAssistantMessage() {
     if (!messagesEl) return;
     if (heroEl) heroEl.classList.add('is-hidden');
-    const { bubble } = renderMessage('assistant', '', false, null, true /* noScroll */);
+    const { row, bubble } = renderMessage('assistant', '', false, null, true /* noScroll */);
     bubble.innerHTML = '';
     const textEl = document.createElement('div');
     textEl.className = 'ga-reply';
@@ -193,6 +193,15 @@
     bubble.appendChild(textEl);
     typeAssistantText(textEl, getInitialAssistantMessage(), 'messages', true, 86).then(() => {
       textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
+      // After animation, measure actual positions and scroll just enough to clear the composer.
+      requestAnimationFrame(() => {
+        const composerEl = formEl && formEl.closest('.ga-composer');
+        if (!composerEl || !row) return;
+        const rowBottom = row.getBoundingClientRect().bottom;
+        const composerTop = composerEl.getBoundingClientRect().top;
+        const overlap = rowBottom - composerTop + 10; // 10px gap
+        if (overlap > 0) window.scrollBy(0, overlap);
+      });
     });
   }
 
