@@ -186,6 +186,7 @@ body {
   min-height: 120px;
   display: flex;
   flex-direction: column;
+  justify-content: flex-end;
 }
 
 .ga-msg {
@@ -750,7 +751,8 @@ body {
   }
 
   .ga-messages {
-    min-height: 0;
+    /* Tall enough that first message (justify-content: flex-end) lands above the fixed composer. */
+    min-height: calc(100dvh - 130px);
   }
 
   .ga-composer {
