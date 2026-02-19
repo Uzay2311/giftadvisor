@@ -34,7 +34,7 @@ A standalone gift recommendation website that helps people find the perfect gift
    SERPAPI_API_KEY=your-serpapi-key   # For Amazon products (serpapi.com, engine=amazon)
    ```
 
-   Optional: `OPENAI_MODEL` (default: `gpt-4o-mini`), `AMAZON_AFFILIATE_TAG` (default: bestgift0514-20)
+  Optional: `OPENAI_MODEL` (default: `gpt-4.1-mini`), `AMAZON_AFFILIATE_TAG` (default: bestgift0514-20)
 
 4. **Run the app**:
 
