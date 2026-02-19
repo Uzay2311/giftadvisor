@@ -752,6 +752,9 @@ body {
   }
 
   .ga-composer {
-    padding: 0.55rem 0.5rem 0.55rem;
+    position: sticky;
+    bottom: 0;
+    z-index: 6;
+    padding: 0.55rem 0.5rem calc(0.55rem + env(safe-area-inset-bottom));
   }
 }
