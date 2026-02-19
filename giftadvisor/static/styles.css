@@ -751,8 +751,8 @@ body {
   }
 
   .ga-messages {
-    /* Tall enough that first message (justify-content: flex-end) lands above the fixed composer. */
-    min-height: calc(100dvh - 130px);
+    /* Push first message above the fixed composer: 100dvh - header(~75) - pads(~15) - composer(~70) - gap(~20) */
+    min-height: calc(100dvh - 180px);
   }
 
   .ga-composer {
