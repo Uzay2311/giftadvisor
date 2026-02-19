@@ -722,8 +722,8 @@ body {
     gap: 0.55rem;
   }
 
-  /* Push the page bottom below the fixed composer so last message is never hidden. */
-  .ga-app {
+  /* Push the bottom of the chat card below the fixed composer — stays white, no grey gap. */
+  .ga-chat {
     padding-bottom: calc(7rem + env(safe-area-inset-bottom));
   }
 
