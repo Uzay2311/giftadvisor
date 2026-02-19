@@ -36,6 +36,7 @@
   let messages = [];
   let activeProfileId = '';
   let peopleProfiles = null;
+  let stickToBottom = true;
   const likedProductsByProfile = new Map();
   const dislikedProductsByProfile = new Map();
 
@@ -536,10 +537,18 @@
     return { row, bubble };
   }
 
+  function isNearBottom() {
+    if (!messagesEl) return true;
+    const threshold = 56;
+    const remaining = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+    return remaining <= threshold;
+  }
+
   function scrollToBottom(force = false) {
     if (!messagesEl) return;
-    messagesEl.scrollTop = messagesEl.scrollHeight;
     const inputFocused = !!inputEl && document.activeElement === inputEl;
+    if (!force && !stickToBottom && !inputFocused) return;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
     if (formEl) {
       const rect = formEl.getBoundingClientRect();
       const viewportH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
@@ -557,15 +566,21 @@
     setTimeout(() => scrollToBottom(force), 120);
   }
 
+  if (messagesEl) {
+    messagesEl.addEventListener('scroll', () => {
+      stickToBottom = isNearBottom();
+    }, { passive: true });
+  }
+
   syncViewportHeightVar();
   window.addEventListener('resize', () => scheduleAutoScroll(false), { passive: true });
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', () => scheduleAutoScroll(true), { passive: true });
-    window.visualViewport.addEventListener('scroll', () => scheduleAutoScroll(true), { passive: true });
+    window.visualViewport.addEventListener('resize', () => scheduleAutoScroll(false), { passive: true });
   }
   if (inputEl) {
     inputEl.addEventListener('focus', () => {
       // Mobile keyboards resize viewport asynchronously.
+      stickToBottom = true;
       scheduleAutoScroll(true);
       setTimeout(() => scheduleAutoScroll(true), 120);
       setTimeout(() => scheduleAutoScroll(true), 260);
@@ -760,6 +775,7 @@
 
     messages.push({ role: 'user', content: msg });
     renderMessage('user', msg);
+    stickToBottom = true;
     scheduleAutoScroll(true);
     setHeroVisibility();
 
