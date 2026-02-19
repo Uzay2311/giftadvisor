@@ -544,14 +544,6 @@
     const inputFocused = !!inputEl && document.activeElement === inputEl;
     if (!force && !stickToBottom && !inputFocused) return;
     scrollEl.scrollTop = scrollEl.scrollHeight;
-    if (formEl) {
-      const rect = formEl.getBoundingClientRect();
-      const viewportH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-      const isOutOfView = rect.bottom > viewportH || rect.top < 0;
-      if (isOutOfView && (force || inputFocused || stickToBottom)) {
-        formEl.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'auto' });
-      }
-    }
   }
 
   function scheduleAutoScroll(force = false) {

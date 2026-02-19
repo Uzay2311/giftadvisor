@@ -688,6 +688,12 @@ body {
 }
 
 @media (max-width: 768px) {
+  .ga-app {
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+  }
+
   .ga-header {
     padding: 0.85rem 0.75rem 0.5rem;
   }
@@ -709,11 +715,13 @@ body {
 
   .ga-main {
     padding: 0.2rem;
+    min-height: 0;
   }
 
   .ga-chat {
     max-width: none;
-    min-height: calc(100dvh - 132px);
+    height: 100%;
+    min-height: 0;
   }
 
   .ga-chat__center {
@@ -752,6 +760,6 @@ body {
   }
 
   .ga-composer {
-    padding: 0.55rem 0.5rem 0.55rem;
+    padding: 0.55rem 0.5rem calc(0.55rem + env(safe-area-inset-bottom));
   }
 }
