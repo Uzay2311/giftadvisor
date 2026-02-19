@@ -713,18 +713,15 @@ body {
 
   .ga-chat {
     max-width: none;
-    min-height: calc(100dvh - 132px);
+    min-height: unset;
+    /* Clearance below last message so it never hides behind the fixed composer. */
+    padding-bottom: calc(7rem + env(safe-area-inset-bottom));
   }
 
   .ga-chat__center {
     padding: 0.55rem 0.5rem 0;
     padding-bottom: 0.5rem;
     gap: 0.55rem;
-  }
-
-  /* Push the bottom of the chat card below the fixed composer — stays white, no grey gap. */
-  .ga-chat {
-    padding-bottom: calc(7rem + env(safe-area-inset-bottom));
   }
 
   .ga-occasion {
@@ -754,7 +751,7 @@ body {
   }
 
   .ga-messages {
-    min-height: 56px;
+    min-height: 0;
   }
 
   .ga-composer {
