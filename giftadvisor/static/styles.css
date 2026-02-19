@@ -715,7 +715,7 @@ body {
     max-width: none;
     min-height: unset;
     /* Clearance below last message so it never hides behind the fixed composer. */
-    padding-bottom: calc(7rem + env(safe-area-inset-bottom));
+    padding-bottom: calc(4.5rem + env(safe-area-inset-bottom));
   }
 
   .ga-chat__center {

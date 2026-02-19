@@ -185,7 +185,7 @@
   function renderInitialAssistantMessage() {
     if (!messagesEl) return;
     if (heroEl) heroEl.classList.add('is-hidden');
-    const { bubble } = renderMessage('assistant', '');
+    const { bubble } = renderMessage('assistant', '', false, null, true /* noScroll */);
     bubble.innerHTML = '';
     const textEl = document.createElement('div');
     textEl.className = 'ga-reply';
@@ -194,7 +194,6 @@
     typeAssistantText(textEl, getInitialAssistantMessage(), 'messages', true, 86).then(() => {
       textEl.innerHTML = formatReplyHtml(textEl.textContent || '');
     });
-    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
   }
 
   function normalize(text) {
@@ -491,7 +490,7 @@
     return card;
   }
 
-  function renderMessage(role, text, isTyping = false, productsByQuery = null) {
+  function renderMessage(role, text, isTyping = false, productsByQuery = null, noScroll = false) {
     const row = document.createElement('div');
     row.className = `ga-msg ga-msg--${role}`;
 
@@ -532,7 +531,7 @@
     }
 
     messagesEl.appendChild(row);
-    scheduleAutoScroll(true);
+    if (!noScroll) scheduleAutoScroll(true);
     return { row, bubble };
   }
 
